@@ -1,0 +1,4 @@
+github.com/BurntSushi/toml v0.3.1 h1:WXkYYl6Yr3qBf1K79EBnL4mak0OimBfB0XUf9Vl28OQ=
+github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
+github.com/siddontang/mixer v0.0.0-20151010030726-2e99afd4fe8e h1:UHWyZvrgwqOMEx28z8NwO2m0E1mlq5ey3caby4qti2o=
+github.com/siddontang/mixer v0.0.0-20151010030726-2e99afd4fe8e/go.mod h1:pnFk8tk59cvecIX6RRkg3qWNfjKlHSONR3K3cpqGJL0=
