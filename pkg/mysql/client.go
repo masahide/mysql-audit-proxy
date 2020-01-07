@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/siddontang/mixer/mysql"
 )
 
-// ProxyClient proxy <-> mysql server
+//ProxyClient proxy <-> mysql server
 type ProxyClient struct {
 	client     *ClientConn
 	conn       net.Conn
@@ -23,42 +24,43 @@ type ProxyClient struct {
 	capability uint32
 	status     uint16
 	collation  mysql.CollationId
-	//charset    string
-	salt []byte
-	//lastPing int64
-	//pkgErr error
+	charset    string
+	salt       []byte
+	lastPing   int64
+	pkgErr     error
 }
 
-func (pc *ProxyClient) connect(addr string, user string, password string, db string) error {
-	pc.addr = addr
-	pc.user = user
-	pc.password = password
-	pc.db = db
+// connect to mysql server
+func (c *ProxyClient) connect(addr string, user string, password string, db string) error {
+	c.addr = addr
+	c.user = user
+	c.password = password
+	c.db = db
 
 	//use utf8
-	pc.collation = mysql.DEFAULT_COLLATION_ID
-	//pc.charset = mysql.DEFAULT_CHARSET
+	c.collation = mysql.DEFAULT_COLLATION_ID
+	c.charset = mysql.DEFAULT_CHARSET
 
-	return pc.reConnect()
+	return c.reConnect()
 }
 
-func (pc *ProxyClient) reConnect() error {
-	var (
-		err     error
-		netConn net.Conn
-	)
-
-	if pc.conn != nil {
-		pc.conn.Close()
+func (c *ProxyClient) reConnect() error {
+	if c.conn != nil {
+		c.conn.Close()
 	}
+
 	n := "tcp"
-	if strings.Contains(pc.addr, "/") {
+	if strings.Contains(c.addr, "/") {
 		n = "unix"
 	}
-	netConn, err = net.Dial(n, pc.addr)
+
+	var err error
+	var netConn net.Conn
+	netConn, err = net.Dial(n, c.addr)
 	if err != nil {
 		return err
 	}
+
 	switch t := netConn.(type) {
 	case *net.TCPConn:
 		tcpConn := t
@@ -67,45 +69,47 @@ func (pc *ProxyClient) reConnect() error {
 		// The default is true (no delay),
 		// meaning that data is sent as soon as possible after a Write.
 		//I set this option false.
-		// nolint: errcheck
+		// nolint:errcheck
 		tcpConn.SetNoDelay(false)
-		pc.conn = tcpConn
+		c.conn = tcpConn
 	default:
-		pc.conn = t
+		c.conn = netConn
 	}
+	c.pkg = mysql.NewPacketIO(c.conn)
 
-	pc.pkg = mysql.NewPacketIO(pc.conn)
-
-	if err := pc.readInitialHandshake(); err != nil {
-		pc.conn.Close()
+	if err := c.readInitialHandshake(); err != nil {
+		c.conn.Close()
 		return err
 	}
 
-	if err := pc.writeAuthHandshake(); err != nil {
-		pc.conn.Close()
+	if err := c.writeAuthHandshake(); err != nil {
+		c.conn.Close()
+
 		return err
 	}
 
-	if _, err := pc.readOK(); err != nil {
-		pc.conn.Close()
+	if _, err := c.readOK(); err != nil {
+		c.conn.Close()
+
 		return err
 	}
 
 	//we must always use autocommit
-	if !pc.isAutoCommit() {
-		if _, err := pc.exec("set autocommit = 1"); err != nil {
-			pc.conn.Close()
+	if !c.isAutoCommit() {
+		if _, err := c.exec("set autocommit = 1"); err != nil {
+			c.conn.Close()
+
 			return err
 		}
 	}
 
-	//pc.lastPing = time.Now().Unix()
+	c.lastPing = time.Now().Unix()
 
 	return nil
 }
 
-func (pc *ProxyClient) readInitialHandshake() error {
-	data, err := pc.readPacket()
+func (c *ProxyClient) readInitialHandshake() error {
+	data, err := c.readPacket()
 	if err != nil {
 		return err
 	}
@@ -123,25 +127,25 @@ func (pc *ProxyClient) readInitialHandshake() error {
 	//connection id length is 4
 	pos := 1 + bytes.IndexByte(data[1:], 0x00) + 1 + 4
 
-	pc.salt = append(pc.salt, data[pos:pos+8]...)
+	c.salt = append(c.salt, data[pos:pos+8]...)
 
 	//skip filter
 	pos += 8 + 1
 
 	//capability lower 2 bytes
-	pc.capability = uint32(binary.LittleEndian.Uint16(data[pos : pos+2]))
+	c.capability = uint32(binary.LittleEndian.Uint16(data[pos : pos+2]))
 
 	pos += 2
 
 	if len(data) > pos {
 		//skip server charset
-		//pc.charset = data[pos]
+		//c.charset = data[pos]
 		pos++
 
-		pc.status = binary.LittleEndian.Uint16(data[pos : pos+2])
+		c.status = binary.LittleEndian.Uint16(data[pos : pos+2])
 		pos += 2
 
-		pc.capability = uint32(binary.LittleEndian.Uint16(data[pos:pos+2]))<<16 | pc.capability
+		c.capability = uint32(binary.LittleEndian.Uint16(data[pos:pos+2]))<<16 | c.capability
 
 		pos += 2
 
@@ -153,18 +157,18 @@ func (pc *ProxyClient) readInitialHandshake() error {
 		// The official Python library uses the fixed length 12
 		// mysql-proxy also use 12
 		// which is not documented but seems to work.
-		pc.salt = append(pc.salt, data[pos:pos+12]...)
+		c.salt = append(c.salt, data[pos:pos+12]...)
 	}
 
 	return nil
 }
 
-func (pc *ProxyClient) writeAuthHandshake() error {
+func (c *ProxyClient) writeAuthHandshake() error {
 	// Adjust client capability flags based on server support
 	capability := mysql.CLIENT_PROTOCOL_41 | mysql.CLIENT_SECURE_CONNECTION |
 		mysql.CLIENT_LONG_PASSWORD | mysql.CLIENT_TRANSACTIONS | mysql.CLIENT_LONG_FLAG
 
-	capability &= pc.capability
+	capability &= c.capability
 
 	//packet length
 	//capbility 4
@@ -174,20 +178,20 @@ func (pc *ProxyClient) writeAuthHandshake() error {
 	length := 4 + 4 + 1 + 23
 
 	//username
-	length += len(pc.user) + 1
+	length += len(c.user) + 1
 
 	//we only support secure connection
-	auth := mysql.CalcPassword(pc.salt, []byte(pc.password))
+	auth := mysql.CalcPassword(c.salt, []byte(c.password))
 
 	length += 1 + len(auth)
 
-	if len(pc.db) > 0 {
+	if len(c.db) > 0 {
 		capability |= mysql.CLIENT_CONNECT_WITH_DB
 
-		length += len(pc.db) + 1
+		length += len(c.db) + 1
 	}
 
-	pc.capability = capability
+	c.capability = capability
 
 	data := make([]byte, length+4)
 
@@ -204,14 +208,14 @@ func (pc *ProxyClient) writeAuthHandshake() error {
 	//data[11] = 0x00
 
 	//Charset [1 byte]
-	data[12] = byte(pc.collation)
+	data[12] = byte(c.collation)
 
 	//Filler [23 bytes] (all 0x00)
 	pos := 13 + 23
 
 	//User [null terminated string]
-	if len(pc.user) > 0 {
-		pos += copy(data[pos:], pc.user)
+	if len(c.user) > 0 {
+		pos += copy(data[pos:], c.user)
 	}
 	//data[pos] = 0x00
 	pos++
@@ -221,43 +225,44 @@ func (pc *ProxyClient) writeAuthHandshake() error {
 	pos += 1 + copy(data[pos+1:], auth)
 
 	// db [null terminated string]
-
-	if len(pc.db) > 0 {
-		/*pos +=*/ copy(data[pos:], pc.db)
+	if len(c.db) > 0 {
+		copy(data[pos:], c.db)
+		//pos += copy(data[pos:], c.db)
 		//data[pos] = 0x00
 	}
 
-	return pc.writePacket(data)
+	return c.writePacket(data)
 }
 
-func (pc *ProxyClient) readOK() (*mysql.Result, error) {
-	data, err := pc.readPacket()
+func (c *ProxyClient) readOK() (*mysql.Result, error) {
+	data, err := c.readPacket()
 	if err != nil {
 		return nil, err
 	}
 
-	switch {
-	case data[0] == mysql.OK_HEADER:
-		return pc.handleOKPacket(data)
-	case data[0] == mysql.ERR_HEADER:
-		return nil, pc.handleErrorPacket(data)
+	switch data[0] {
+	case mysql.OK_HEADER:
+		return c.handleOKPacket(data)
+	case mysql.ERR_HEADER:
+		return nil, c.handleErrorPacket(data)
+	default:
+		return nil, errors.New("invalid ok packet")
 	}
-	return nil, errors.New("invalid ok packet")
 }
 
-func (pc *ProxyClient) writePacket(data []byte) error {
-	err := pc.pkg.WritePacket(data)
-	//pc.pkgErr = err
+func (c *ProxyClient) writePacket(data []byte) error {
+	err := c.pkg.WritePacket(data)
+	c.pkgErr = err
 	return err
 }
 
-func (pc *ProxyClient) readPacket() ([]byte, error) {
-	d, err := pc.pkg.ReadPacket()
-	//pc.pkgErr = err
+func (c *ProxyClient) readPacket() ([]byte, error) {
+	d, err := c.pkg.ReadPacket()
+	c.pkgErr = err
 	return d, err
 }
 
-func (pc *ProxyClient) handleOKPacket(data []byte) (*mysql.Result, error) {
+func (c *ProxyClient) handleOKPacket(data []byte) (*mysql.Result, error) {
 	var n int
 	var pos int = 1
 
@@ -268,24 +273,24 @@ func (pc *ProxyClient) handleOKPacket(data []byte) (*mysql.Result, error) {
 	r.InsertId, _, n = mysql.LengthEncodedInt(data[pos:])
 	pos += n
 
-	if pc.capability&mysql.CLIENT_PROTOCOL_41 > 0 {
+	if c.capability&mysql.CLIENT_PROTOCOL_41 > 0 {
 		r.Status = binary.LittleEndian.Uint16(data[pos:])
-		pc.status = r.Status
+		c.status = r.Status
 		//pos += 2
 
 		//TODO:strict_mode, check warnings as error
 		//Warnings := binary.LittleEndian.Uint16(data[pos:])
 		//pos += 2
-	} else if pc.capability&mysql.CLIENT_TRANSACTIONS > 0 {
+	} else if c.capability&mysql.CLIENT_TRANSACTIONS > 0 {
 		r.Status = binary.LittleEndian.Uint16(data[pos:])
-		pc.status = r.Status
+		c.status = r.Status
 		//pos += 2
 	}
 
 	//info
 	return r, nil
 }
-func (pc *ProxyClient) handleErrorPacket(data []byte) error {
+func (c *ProxyClient) handleErrorPacket(data []byte) error {
 	e := new(mysql.SqlError)
 
 	var pos int = 1
@@ -293,7 +298,7 @@ func (pc *ProxyClient) handleErrorPacket(data []byte) error {
 	e.Code = binary.LittleEndian.Uint16(data[pos:])
 	pos += 2
 
-	if pc.capability&mysql.CLIENT_PROTOCOL_41 > 0 {
+	if c.capability&mysql.CLIENT_PROTOCOL_41 > 0 {
 		//skip '#'
 		pos++
 		e.State = string(data[pos : pos+5])
@@ -305,18 +310,18 @@ func (pc *ProxyClient) handleErrorPacket(data []byte) error {
 	return e
 }
 
-func (pc *ProxyClient) isAutoCommit() bool {
-	return pc.status&mysql.SERVER_STATUS_AUTOCOMMIT > 0
+func (c *ProxyClient) isAutoCommit() bool {
+	return c.status&mysql.SERVER_STATUS_AUTOCOMMIT > 0
 }
-func (pc *ProxyClient) exec(query string) (*mysql.Result, error) {
-	if err := pc.writeCommandStr(mysql.COM_QUERY, query); err != nil {
+func (c *ProxyClient) exec(query string) (*mysql.Result, error) {
+	if err := c.writeCommandStr(mysql.COM_QUERY, query); err != nil {
 		return nil, err
 	}
 
-	return pc.readResult(false)
+	return c.readResult(false)
 }
-func (pc *ProxyClient) writeCommandStr(command byte, arg string) error {
-	pc.pkg.Sequence = 0
+func (c *ProxyClient) writeCommandStr(command byte, arg string) error {
+	c.pkg.Sequence = 0
 
 	length := len(arg) + 1
 
@@ -326,26 +331,26 @@ func (pc *ProxyClient) writeCommandStr(command byte, arg string) error {
 
 	copy(data[5:], arg)
 
-	return pc.writePacket(data)
+	return c.writePacket(data)
 }
-func (pc *ProxyClient) readResult(binary bool) (*mysql.Result, error) {
-	data, err := pc.readPacket()
+func (c *ProxyClient) readResult(binary bool) (*mysql.Result, error) {
+	data, err := c.readPacket()
 	if err != nil {
 		return nil, err
 	}
 
-	switch {
-	case data[0] == mysql.OK_HEADER:
-		return pc.handleOKPacket(data)
-	case data[0] == mysql.ERR_HEADER:
-		return nil, pc.handleErrorPacket(data)
-	case data[0] == mysql.LocalInFile_HEADER:
+	switch data[0] {
+	case mysql.OK_HEADER:
+		return c.handleOKPacket(data)
+	case mysql.ERR_HEADER:
+		return nil, c.handleErrorPacket(data)
+	case mysql.LocalInFile_HEADER:
 		return nil, mysql.ErrMalformPacket
 	}
 
-	return pc.readResultset(data, binary)
+	return c.readResultset(data, binary)
 }
-func (pc *ProxyClient) readResultset(data []byte, binary bool) (*mysql.Result, error) {
+func (c *ProxyClient) readResultset(data []byte, binary bool) (*mysql.Result, error) {
 	result := &mysql.Result{
 		Status:       0,
 		InsertId:     0,
@@ -364,33 +369,33 @@ func (pc *ProxyClient) readResultset(data []byte, binary bool) (*mysql.Result, e
 	result.Fields = make([]*mysql.Field, count)
 	result.FieldNames = make(map[string]int, count)
 
-	if err := pc.readResultColumns(result); err != nil {
+	if err := c.readResultColumns(result); err != nil {
 		return nil, err
 	}
 
-	if err := pc.readResultRows(result, binary); err != nil {
+	if err := c.readResultRows(result, binary); err != nil {
 		return nil, err
 	}
 
 	return result, nil
 }
-func (pc *ProxyClient) readResultColumns(result *mysql.Result) (err error) {
+func (c *ProxyClient) readResultColumns(result *mysql.Result) (err error) {
 	var i int = 0
 	var data []byte
 
 	for {
-		data, err = pc.readPacket()
+		data, err = c.readPacket()
 		if err != nil {
 			return
 		}
 
 		// EOF Packet
-		if pc.isEOFPacket(data) {
-			if pc.capability&mysql.CLIENT_PROTOCOL_41 > 0 {
+		if c.isEOFPacket(data) {
+			if c.capability&mysql.CLIENT_PROTOCOL_41 > 0 {
 				//result.Warnings = binary.LittleEndian.Uint16(data[1:])
-				//TODO: add strict_mode, warning will be treat as error
+				//TODO add strict_mode, warning will be treat as error
 				result.Status = binary.LittleEndian.Uint16(data[3:])
-				pc.status = result.Status
+				c.status = result.Status
 			}
 
 			if i != len(result.Fields) {
@@ -410,23 +415,23 @@ func (pc *ProxyClient) readResultColumns(result *mysql.Result) (err error) {
 		i++
 	}
 }
-func (pc *ProxyClient) readResultRows(result *mysql.Result, isBinary bool) (err error) {
+func (c *ProxyClient) readResultRows(result *mysql.Result, isBinary bool) (err error) {
 	var data []byte
 
 	for {
-		data, err = pc.readPacket()
+		data, err = c.readPacket()
 
 		if err != nil {
 			return
 		}
 
 		// EOF Packet
-		if pc.isEOFPacket(data) {
-			if pc.capability&mysql.CLIENT_PROTOCOL_41 > 0 {
+		if c.isEOFPacket(data) {
+			if c.capability&mysql.CLIENT_PROTOCOL_41 > 0 {
 				//result.Warnings = binary.LittleEndian.Uint16(data[1:])
 				//TODO add strict_mode, warning will be treat as error
 				result.Status = binary.LittleEndian.Uint16(data[3:])
-				pc.status = result.Status
+				c.status = result.Status
 			}
 
 			break
@@ -449,24 +454,24 @@ func (pc *ProxyClient) readResultRows(result *mysql.Result, isBinary bool) (err 
 }
 
 /*
-func (pc *ProxyClient) readUntilEOF() (err error) {
+func (c *ProxyClient) readUntilEOF() (err error) {
 	var data []byte
 
 	for {
-		data, err = pc.readPacket()
+		data, err = c.readPacket()
 
 		if err != nil {
 			return
 		}
 
 		// EOF Packet
-		if pc.isEOFPacket(data) {
+		if c.isEOFPacket(data) {
 			return
 		}
 	}
 }
 */
 
-func (pc *ProxyClient) isEOFPacket(data []byte) bool {
+func (c *ProxyClient) isEOFPacket(data []byte) bool {
 	return data[0] == mysql.EOF_HEADER && len(data) <= 5
 }

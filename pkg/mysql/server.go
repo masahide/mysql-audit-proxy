@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -13,8 +14,10 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/masahide/mysql-audit-proxy/pkg/parser"
+	"github.com/masahide/rcp/pkg/bytesize"
 	"github.com/siddontang/mixer/mysql"
 )
 
@@ -24,20 +27,23 @@ const (
 )
 
 // nolint:gochecknoglobals
-var defaultCapability uint32 = mysql.CLIENT_LONG_PASSWORD | mysql.CLIENT_LONG_FLAG |
-	mysql.CLIENT_CONNECT_WITH_DB | mysql.CLIENT_PROTOCOL_41 |
-	mysql.CLIENT_TRANSACTIONS | mysql.CLIENT_SECURE_CONNECTION
+var (
+	defaultCapability uint32 = mysql.CLIENT_LONG_PASSWORD | mysql.CLIENT_LONG_FLAG |
+		mysql.CLIENT_CONNECT_WITH_DB | mysql.CLIENT_PROTOCOL_41 |
+		mysql.CLIENT_TRANSACTIONS | mysql.CLIENT_SECURE_CONNECTION
+)
 
 // Config Proxy
 type Config struct {
-	Net            string `yaml:"net"`
-	Addr           string `yaml:"addr"`
-	AllowIps       string `yaml:"allow_ips"`
-	CaCertFile     string
-	CaKeyFile      string
-	ClientCertFile string
-	ClientKeyFile  string
-	ConfigPath     string
+	Net             string `yaml:"net"`
+	Addr            string `yaml:"addr"`
+	AllowIps        string `yaml:"allow_ips"`
+	ConfigPath      string
+	LogFileName     string
+	RotateTime      time.Duration
+	BufSize         string
+	QueueSize       int
+	BufferFlushTime time.Duration
 }
 
 // NodeConfig node config
@@ -53,15 +59,58 @@ type Server struct {
 	cfg  *Config
 	addr string
 	//password string
-	running  bool
 	listener net.Listener
 	allowips []net.IP
 	//node     *NodeConfig
 	baseConnID uint32
+	bs         *buffers
+	queue      chan *SendPackets
+	al         *auditLogs
+	bufSize    int
+}
+
+type buffers struct {
+	limit chan struct{}
+	pool  sync.Pool
+}
+
+// SendPackets tx packets
+type SendPackets struct {
+	Datetime     time.Time `json:"time"`
+	ConnectionID uint32    `json:"id,omitempty"`
+	User         string    `json:"user,omitempty"`
+	Db           string    `json:"db,omitempty"`
+	Addr         string    `json:"addr,omitempty"`
+	State        string    `json:"state,omitempty"`
+	Err          string    `json:"err,omitempty"`
+	Packets      []byte    `json:"packets,omitempty"`
+	Cmd          string    `json:"cmd,omitempty"`
+	buf          []byte
+}
+
+func newBuffers(size, n int) *buffers {
+	bs := buffers{}
+	bs.limit = make(chan struct{}, n)
+	bs.pool = sync.Pool{New: func() interface{} {
+		sp := SendPackets{buf: make([]byte, size)}
+		sp.Packets = sp.buf[:0]
+		return &sp
+	}}
+	return &bs
+}
+
+func (bs *buffers) Get() *SendPackets {
+	bs.limit <- struct{}{} // 空くまで待つ
+	return bs.pool.Get().(*SendPackets)
+}
+
+func (bs *buffers) Put(b *SendPackets) {
+	bs.pool.Put(b)
+	<-bs.limit // 解放
 }
 
 // NewServer new Server
-func NewServer(cfg *Config) (*Server, error) {
+func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 	s := new(Server)
 
 	s.cfg = cfg
@@ -73,7 +122,10 @@ func NewServer(cfg *Config) (*Server, error) {
 	s.baseConnID = 10000
 	var err error
 
-	s.listener, err = net.Listen(cfg.Net, s.addr)
+	lc := net.ListenConfig{
+		KeepAlive: 300 * time.Second,
+	}
+	s.listener, err = lc.Listen(ctx, cfg.Net, s.addr)
 
 	if err != nil {
 		return nil, err
@@ -86,11 +138,25 @@ func NewServer(cfg *Config) (*Server, error) {
 	}
 
 	log.Printf("server.NewServer Server running. address %s:%s", cfg.Net, s.addr)
+	bufsize, err := bytesize.Parse(s.cfg.BufSize)
+	if err != nil {
+		log.Fatalf("bufsize:[%s] parse err:%s", s.cfg.BufSize, err)
+	}
+	s.bufSize = int(bufsize)
+
+	s.queue = make(chan *SendPackets, s.cfg.QueueSize)
+	s.bs = newBuffers(s.bufSize, s.cfg.QueueSize)
+	s.al = &auditLogs{
+		FileName:   s.cfg.LogFileName,
+		RotateTime: s.cfg.RotateTime,
+		Queue:      s.queue,
+		Bs:         s.bs,
+	}
 	return s, nil
 }
 
 func (s *Server) newClientConn(conn net.Conn) *ClientConn {
-	c := new(ClientConn)
+	cc := new(ClientConn)
 	switch t := conn.(type) {
 	case *net.TCPConn:
 		tcpConn := t
@@ -102,31 +168,33 @@ func (s *Server) newClientConn(conn net.Conn) *ClientConn {
 		//I set this option false.
 		// nolint: errcheck
 		tcpConn.SetNoDelay(false)
-		c.c = tcpConn
+		cc.c = tcpConn
 	default:
-		c.c = conn
+		cc.c = conn
 	}
 
-	c.pkg = mysql.NewPacketIO(c.c)
-	c.proxy = s
+	cc.pkg = mysql.NewPacketIO(cc.c)
+	cc.proxy = s
 
-	c.pkg.Sequence = 0
+	cc.pkg.Sequence = 0
 
-	c.connectionID = atomic.AddUint32(&s.baseConnID, 1)
+	cc.connectionID = atomic.AddUint32(&s.baseConnID, 1)
 
-	c.status = mysql.SERVER_STATUS_AUTOCOMMIT
+	cc.status = mysql.SERVER_STATUS_AUTOCOMMIT
 
-	c.salt = mysql.RandomBuf(20)
+	cc.salt = mysql.RandomBuf(20)
 
-	c.closed = false
+	cc.closed = false
 
-	//c.collation = mysql.DEFAULT_COLLATION_ID
-	//c.charset = mysql.DEFAULT_CHARSET
+	//cc.collation = mysql.DEFAULT_COLLATION_ID
+	//cc.charset = mysql.DEFAULT_CHARSET
 
-	return c
+	cc.bs = s.bs
+	cc.queue = s.queue
+	return cc
 }
 
-func (s *Server) onConn(c net.Conn) {
+func (s *Server) onConn(ctx context.Context, c net.Conn) {
 	clConn := s.newClientConn(c)
 
 	defer func() {
@@ -154,7 +222,7 @@ func (s *Server) onConn(c net.Conn) {
 		return
 	}
 
-	clConn.run()
+	clConn.run(ctx)
 }
 
 func (s *Server) parseAllowIps() {
@@ -170,31 +238,36 @@ func (s *Server) parseAllowIps() {
 }
 
 // Run server main process
-func (s *Server) Run() error {
-	s.running = true
-
-	for s.running {
+func (s *Server) Run(ctx context.Context) error {
+	logErrCh := make(chan error, 1)
+	go s.al.logWorker(ctx, logErrCh)
+	go func() {
+		<-ctx.Done()
+		s.listener.Close()
+		close(s.queue)
+	}()
+L:
+	for {
 		aConn, err := s.listener.Accept()
 		if err != nil {
-			log.Printf("Error server.Run %s", err.Error())
+			log.Printf("listner.Accept %s", err.Error())
+			select {
+			case <-ctx.Done():
+				break L
+			default:
+			}
 			continue
 		}
-
-		go s.onConn(aConn)
+		go s.onConn(ctx, aConn)
 	}
-
-	return nil
+	err := <-logErrCh
+	if err != nil {
+		log.Printf("logWorker err:%s", err)
+	}
+	return err
 }
 
-// Close server
-func (s *Server) Close() {
-	s.running = false
-	if s.listener != nil {
-		s.listener.Close()
-	}
-}
-
-//ClientConn client <-> proxy
+// ClientConn client <-> proxy
 type ClientConn struct {
 	pkg          *mysql.PacketIO
 	c            net.Conn
@@ -211,42 +284,49 @@ type ClientConn struct {
 	//lastInsertId int64
 	//affectedRows int64
 	node *NodeConfig
+
+	bs    *buffers
+	queue chan *SendPackets
 }
 
-func (c *ClientConn) close() error {
-	if c.closed {
+func (cc *ClientConn) close() error {
+	if cc.closed {
 		return nil
 	}
 
-	if err := c.c.Close(); err != nil {
+	if err := cc.c.Close(); err != nil {
 		return err
 	}
 
-	c.closed = true
+	cc.closed = true
 
 	return nil
 }
-func (c *ClientConn) isAllowConnect() bool {
-	clientHost, _, err := net.SplitHostPort(c.c.RemoteAddr().String())
-	if err != nil {
-		fmt.Println(err)
-	}
-	clientIP := net.ParseIP(clientHost)
+func (cc *ClientConn) isAllowConnect() bool {
+	return false
+	/*
+		clientHost, _, err := net.SplitHostPort(cc.c.RemoteAddr().String())
+		if err != nil {
+			fmt.Println(err)
+		}
+		clientIP := net.ParseIP(clientHost)
 
-	ipVec := c.proxy.allowips
-	if ipVecLen := len(ipVec); ipVecLen == 0 {
-		return true
-	}
-	for _, ip := range ipVec {
-		if ip.Equal(clientIP) {
+		ipVec := cc.proxy.allowips
+		if ipVecLen := len(ipVec); ipVecLen == 0 {
 			return true
 		}
-	}
+		for _, ip := range ipVec {
+			if ip.Equal(clientIP) {
+				return true
+			}
+		}
 
-	log.Printf("Error server.isAllowConnect [Access denied]. address:%s ", c.c.RemoteAddr().String())
-	return false
+		log.Printf("Error server.isAllowConnect [Access denied]. address:%s ", cc.c.RemoteAddr().String())
+		return false
+	*/
 }
-func (c *ClientConn) writeError(e error) error {
+
+func (cc *ClientConn) writeError(e error) error {
 	var m *mysql.SqlError
 	var ok bool
 	if m, ok = e.(*mysql.SqlError); !ok {
@@ -258,43 +338,43 @@ func (c *ClientConn) writeError(e error) error {
 	data = append(data, mysql.ERR_HEADER)
 	data = append(data, byte(m.Code), byte(m.Code>>8))
 
-	if c.capability&mysql.CLIENT_PROTOCOL_41 > 0 {
+	if cc.capability&mysql.CLIENT_PROTOCOL_41 > 0 {
 		data = append(data, '#')
 		data = append(data, m.State...)
 	}
 
 	data = append(data, m.Message...)
 
-	return c.writePacket(data)
+	return cc.writePacket(data)
 }
-func (c *ClientConn) handshake() error {
-	if err := c.writeInitialHandshake(); err != nil {
-		log.Printf("Error server.handshake  [%s] connectionID:%d", err.Error(), c.connectionID)
+func (cc *ClientConn) handshake() error {
+	if err := cc.writeInitialHandshake(); err != nil {
+		log.Printf("Error server.handshake  [%s] connectionID:%d", err.Error(), cc.connectionID)
 		return err
 	}
 
-	if err := c.readHandshakeResponse(); err != nil {
-		log.Printf("Error server.readHandshakeResponse [%s] connectionID:%d", err.Error(), c.connectionID)
+	if err := cc.readHandshakeResponse(); err != nil {
+		log.Printf("Error server.readHandshakeResponse [%s] connectionID:%d", err.Error(), cc.connectionID)
 
-		if err := c.writeError(err); err != nil {
+		if err := cc.writeError(err); err != nil {
 			log.Printf("handshake.writeError:%s", err)
 		}
 
 		return err
 	}
 
-	if err := c.writeOK(nil); err != nil {
-		log.Printf("Error server.readHandshakeResponse [write ok fail] [%s] connectionID:%d", err.Error(), c.connectionID)
+	if err := cc.writeOK(nil); err != nil {
+		log.Printf("Error server.readHandshakeResponse [write ok fail] [%s] connectionID:%d", err.Error(), cc.connectionID)
 		return err
 	}
 
-	c.pkg.Sequence = 0
+	cc.pkg.Sequence = 0
 
 	return nil
 }
-func (c *ClientConn) writeOK(r *mysql.Result) error {
+func (cc *ClientConn) writeOK(r *mysql.Result) error {
 	if r == nil {
-		r = &mysql.Result{Status: c.status}
+		r = &mysql.Result{Status: cc.status}
 	}
 	data := make([]byte, 4, 32)
 
@@ -303,15 +383,15 @@ func (c *ClientConn) writeOK(r *mysql.Result) error {
 	data = append(data, mysql.PutLengthEncodedInt(r.AffectedRows)...)
 	data = append(data, mysql.PutLengthEncodedInt(r.InsertId)...)
 
-	if c.capability&mysql.CLIENT_PROTOCOL_41 > 0 {
+	if cc.capability&mysql.CLIENT_PROTOCOL_41 > 0 {
 		data = append(data, byte(r.Status), byte(r.Status>>8))
 		data = append(data, 0, 0)
 	}
 
-	return c.writePacket(data)
+	return cc.writePacket(data)
 }
 
-func (c *ClientConn) writeInitialHandshake() error {
+func (cc *ClientConn) writeInitialHandshake() error {
 	data := make([]byte, 4, 128)
 
 	//min version 10
@@ -322,10 +402,14 @@ func (c *ClientConn) writeInitialHandshake() error {
 	data = append(data, 0)
 
 	//connection id
-	data = append(data, byte(c.connectionID), byte(c.connectionID>>8), byte(c.connectionID>>16), byte(c.connectionID>>24))
+	data = append(data,
+		byte(cc.connectionID),
+		byte(cc.connectionID>>8),
+		byte(cc.connectionID>>16),
+		byte(cc.connectionID>>24))
 
 	//auth-plugin-data-part-1
-	data = append(data, c.salt[0:8]...)
+	data = append(data, cc.salt[0:8]...)
 
 	//filter [00]
 	data = append(data, 0)
@@ -337,7 +421,7 @@ func (c *ClientConn) writeInitialHandshake() error {
 	data = append(data, uint8(mysql.DEFAULT_COLLATION_ID))
 
 	//status
-	data = append(data, byte(c.status), byte(c.status>>8))
+	data = append(data, byte(cc.status), byte(cc.status>>8))
 
 	//below 13 byte may not be used
 	//capability flag upper 2 bytes, using default capability here
@@ -350,31 +434,31 @@ func (c *ClientConn) writeInitialHandshake() error {
 	data = append(data, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
 	//auth-plugin-data-part-2
-	data = append(data, c.salt[8:]...)
+	data = append(data, cc.salt[8:]...)
 
 	//filter [00]
 	data = append(data, 0)
 
-	return c.writePacket(data)
+	return cc.writePacket(data)
 }
 
-func (c *ClientConn) getNodeFromConfigFile() (*NodeConfig, error) {
-	if c.proxy.cfg.ConfigPath == "" {
+func (cc *ClientConn) getNodeFromConfigFile() (*NodeConfig, error) {
+	if cc.proxy.cfg.ConfigPath == "" {
 		return nil, nil
 	}
-	if strings.Contains(c.user, ";") {
+	if strings.Contains(cc.user, ";") {
 		return nil, nil
 	}
 	p := parser.Parser{
-		ConfigPath: c.proxy.cfg.ConfigPath,
+		ConfigPath: cc.proxy.cfg.ConfigPath,
 	}
 	proxyUsers, err := p.Parse()
 	if err != nil {
 		return nil, err
 	}
-	substrings := strings.Split(c.user, "@")
+	substrings := strings.Split(cc.user, "@")
 	if len(substrings) != 2 {
-		return nil, fmt.Errorf("invalid user: %s", c.user)
+		return nil, fmt.Errorf("invalid user: %s", cc.user)
 	}
 	proxyUser := proxyUsers[substrings[0]]
 	proxyAddr := proxyUser.ProxyServer
@@ -400,34 +484,36 @@ func (c *ClientConn) getNodeFromConfigFile() (*NodeConfig, error) {
 }
 
 // nolint:gochecknoglobals
-var nodeRe = regexp.MustCompile(`^(.+):(.*)@(.+:\d+);(.+:\d+)(;(.+))?$`)
+//var nodeRe = regexp.MustCompile(`^(.+):(.*)@(.+:\d+);(.+:\d+)(;(.+))?$`)
+var nodeRe = regexp.MustCompile(`^(.+):(.*)@(.+:\d+)(;([^;]+))?$`)
 
-// getNode parse from c.user
+// getNode parse from cc.user
 // example: user:pass@proxy_host:proxy_port;db_host:db_port;db_name
 // pass and db_name is optional
 // example: user:@proxy_host:proxy_port;db_host:db_port
-func (c *ClientConn) getNode() error {
+func (cc *ClientConn) getNode() error {
 	var err error
-	if c.node, err = c.getNodeFromConfigFile(); err != nil {
+	if cc.node, err = cc.getNodeFromConfigFile(); err != nil {
 		log.Print(err)
 	}
-	if c.node != nil {
+	if cc.node != nil {
 		return nil
 	}
-	matches := nodeRe.FindStringSubmatch(c.user)
-	if len(matches) != 7 {
-		return fmt.Errorf("invalid user: %s", c.user)
+	matches := nodeRe.FindStringSubmatch(cc.user)
+	if len(matches) != 6 {
+		return fmt.Errorf("invalid user: %s", cc.user)
 	}
-	c.node = &NodeConfig{
+	cc.node = &NodeConfig{
 		User:     matches[1],
 		Password: matches[2],
-		Db:       matches[6],
-		Addr:     matches[4],
+		Addr:     matches[3],
+		Db:       matches[5],
 	}
+	log.Printf("user:[%s] passwd[xxx] host:[%s] database:[%s]", cc.node.Addr, cc.node.User, cc.node.Db)
 	return nil
 }
-func (c *ClientConn) readHandshakeResponse() error {
-	data, err := c.readPacket()
+func (cc *ClientConn) readHandshakeResponse() error {
+	data, err := cc.readPacket()
 
 	if err != nil {
 		return err
@@ -436,70 +522,72 @@ func (c *ClientConn) readHandshakeResponse() error {
 	pos := 0
 
 	//capability
-	c.capability = binary.LittleEndian.Uint32(data[:4])
+	cc.capability = binary.LittleEndian.Uint32(data[:4])
 	pos += 4
 
 	//skip max packet size
 	pos += 4
 
 	//charset, skip, if you want to use another charset, use set names
-	//c.collation = CollationId(data[pos])
+	//cc.collation = CollationId(data[pos])
 	pos++
 
 	//skip reserved 23[00]
 	pos += 23
 
 	//user name
-	c.user = string(data[pos : pos+bytes.IndexByte(data[pos:], 0)])
-	if err := c.getNode(); err != nil {
+	cc.user = string(data[pos : pos+bytes.IndexByte(data[pos:], 0)])
+	if err := cc.getNode(); err != nil {
 		return err
 	}
-	pos += len(c.user) + 1
+	pos += len(cc.user) + 1
 
 	//auth length and auth
 	authLen := int(data[pos])
 	pos++
-	auth := data[pos : pos+authLen]
+	/*
+		auth := data[pos : pos+authLen]
 
-	checkAuth := mysql.CalcPassword(c.salt, []byte(c.node.Password))
-	if !bytes.Equal(auth, checkAuth) {
-		log.Printf("Error ClientConn.readHandshakeResponse. auth:%v, checkAuth:%v, Password:%v",
-			auth, checkAuth, c.node.Password)
-		return mysql.NewDefaultError(mysql.ER_ACCESS_DENIED_ERROR, c.c.RemoteAddr().String(), c.user, "Yes")
-	}
+			checkAuth := mysql.CalcPassword(cc.salt, []byte(cc.node.Password))
+			if !bytes.Equal(auth, checkAuth) {
+				log.Printf("Error ClientConn.readHandshakeResponse. auth:%v, checkAuth:%v, Password:%v",
+					auth, checkAuth, cc.node.Password)
+				return mysql.NewDefaultError(mysql.ER_ACCESS_DENIED_ERROR, cc.c.RemoteAddr().String(), cc.user, "Yes")
+			}
+	*/
 
 	pos += authLen
 
-	if c.capability&mysql.CLIENT_CONNECT_WITH_DB > 0 {
+	if cc.capability&mysql.CLIENT_CONNECT_WITH_DB > 0 {
 		if len(data[pos:]) == 0 {
 			return nil
 		}
 
 		db := string(data[pos : pos+bytes.IndexByte(data[pos:], 0)])
-		//pos += len(c.db) + 1
+		//pos += len(cc.db) + 1
 
-		if err := c.useDB(db); err != nil {
+		if err := cc.useDB(db); err != nil {
 			return err
 		}
 	}
 
 	return nil
 }
-func (c *ClientConn) useDB(db string) error {
-	c.db = db
-	c.node.Db = db
+func (cc *ClientConn) useDB(db string) error {
+	cc.db = db
+	cc.node.Db = db
 	return nil
 }
 
-func (c *ClientConn) readPacket() ([]byte, error) {
-	return c.pkg.ReadPacket()
+func (cc *ClientConn) readPacket() ([]byte, error) {
+	return cc.pkg.ReadPacket()
 }
 
-func (c *ClientConn) writePacket(data []byte) error {
-	return c.pkg.WritePacket(data)
+func (cc *ClientConn) writePacket(data []byte) error {
+	return cc.pkg.WritePacket(data)
 }
 
-func (c *ClientConn) run() {
+func (cc *ClientConn) run(ctx context.Context) {
 	defer func() {
 		r := recover()
 		if err, ok := r.(error); ok {
@@ -508,33 +596,129 @@ func (c *ClientConn) run() {
 			log.Printf("Error ClientConn.Run [%s] stak:%s", err.Error(), string(buf))
 		}
 
-		c.close()
+		cc.close()
 	}()
 
-	log.Printf("Success Handshake. RemoteAddr:%s", c.c.RemoteAddr())
-	pc := new(ProxyClient)
-	pc.client = c
-	db := c.node
+	log.Printf("Success Handshake. fromAddr:%s", cc.c.RemoteAddr())
+	pc := ProxyClient{client: cc}
+	db := cc.node
 	if err := pc.connect(db.Addr, db.User, db.Password, db.Db); err != nil {
-		log.Fatal(err)
+		log.Printf("pc.connect err:%s", err)
 	}
-	log.Printf("Success Connect. RemoteAddr:%s", pc.conn.RemoteAddr())
+	log.Printf("Success Connect. toAddr:%s", pc.conn.RemoteAddr())
 
-	done := make(chan bool)
-	var once sync.Once
-	onceDone := func() {
-		log.Printf("done.")
-		done <- true
+	// nolint: errcheck
+	cc.sendState(ctx, "connect")
+	wg := sync.WaitGroup{}
+	wg.Add(2)
+	go func() {
+		// nolint:errcheck
+		io.Copy(cc.c, pc.conn)
+		wg.Done()
+	}()
+	go func() {
+		//io.Copy(pc.conn, cc.c)
+		cc.sendWorker(ctx, pc.conn, cc.c)
+		wg.Done()
+	}()
+	wg.Wait()
+	// nolint: errcheck
+	cc.sendState(ctx, "disconnect")
+}
+
+func (cc *ClientConn) sendState(ctx context.Context, state string) error {
+	sp := cc.getSendPackets()
+	sp.State = state
+	sp.Packets = sp.Packets[:0]
+	return cc.postData(ctx, sp)
+}
+
+func (cc *ClientConn) getSendPackets() *SendPackets {
+	sp := cc.bs.Get()
+	sp.Datetime = time.Now()
+	sp.User = cc.node.User
+	sp.Db = cc.node.Db
+	sp.Addr = cc.node.Addr
+	sp.ConnectionID = cc.connectionID
+	sp.State = "est"
+	return sp
+}
+
+func (cc *ClientConn) postData(ctx context.Context, sp *SendPackets) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case cc.queue <- sp:
 	}
-	go func() {
-		// nolint:errcheck
-		io.Copy(c.c, pc.conn)
-		once.Do(onceDone)
-	}()
-	go func() {
-		// nolint:errcheck
-		io.Copy(pc.conn, c.c)
-		once.Do(onceDone)
-	}()
-	<-done
+	return nil
+}
+
+func (cc *ClientConn) sendWorker(ctx context.Context, w net.Conn, r net.Conn) {
+	size := uint64(0)
+	var sp *SendPackets
+	for {
+		if sp == nil {
+			sp = cc.getSendPackets()
+			sp.Packets = sp.buf
+		}
+		n, err := cc.writeBufferAndSend(ctx, sp.Packets, w, r)
+		size += uint64(n)
+		if n > 0 {
+			sp.Packets = sp.Packets[:n]
+			if err := cc.postData(ctx, sp); err != nil {
+				return
+			}
+			sp = nil
+		}
+		if err == io.EOF {
+			return
+		}
+	}
+}
+func (cc *ClientConn) netWrite(ctx context.Context, w net.Conn, buf []byte) (size int, err error) {
+	for {
+		var n int
+		if n, err = w.Write(buf); err != nil {
+			return n, err
+		}
+		size += n
+		if buf = buf[n:]; len(buf) == 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return size, ctx.Err()
+		default:
+		}
+	}
+}
+
+func (cc *ClientConn) writeBufferAndSend(ctx context.Context, buf []byte, w, r net.Conn) (size int, err error) {
+	for {
+		if err = r.SetReadDeadline(time.Now().Add(cc.proxy.cfg.BufferFlushTime)); err != nil {
+			return
+		}
+		var n int
+		n, err = r.Read(buf)
+		size += n
+		if n > 0 {
+			if n, err := cc.netWrite(ctx, w, buf[:n]); err != nil {
+				return n, err
+			}
+		}
+		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+			return
+		} else if err != nil && err == io.EOF {
+			return
+		}
+		buf = buf[n:]
+		if len(buf) == 0 {
+			return
+		}
+		//select {
+		//case <-ctx.Done():
+		//	return size, ctx.Err()
+		//default:
+		//}
+	}
 }
