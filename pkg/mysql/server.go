@@ -40,6 +40,7 @@ type Config struct {
 	AllowIps        string `yaml:"allow_ips"`
 	ConfigPath      string
 	LogFileName     string
+	LogGzip         bool
 	RotateTime      time.Duration
 	BufSize         string
 	QueueSize       int
@@ -151,6 +152,7 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 		RotateTime: s.cfg.RotateTime,
 		Queue:      s.queue,
 		Bs:         s.bs,
+		Gzip:       s.cfg.LogGzip,
 	}
 	return s, nil
 }
@@ -183,8 +185,6 @@ func (s *Server) newClientConn(conn net.Conn) *ClientConn {
 	cc.status = mysql.SERVER_STATUS_AUTOCOMMIT
 
 	cc.salt = mysql.RandomBuf(20)
-
-	cc.closed = false
 
 	//cc.collation = mysql.DEFAULT_COLLATION_ID
 	//cc.charset = mysql.DEFAULT_CHARSET
@@ -277,10 +277,9 @@ type ClientConn struct {
 	status       uint16
 	//collation    mysql.CollationId
 	//charset      string
-	user   string
-	db     string
-	salt   []byte
-	closed bool
+	user string
+	db   string
+	salt []byte
 	//lastInsertId int64
 	//affectedRows int64
 	node *NodeConfig
@@ -290,16 +289,14 @@ type ClientConn struct {
 }
 
 func (cc *ClientConn) close() error {
-	if cc.closed {
+	if cc.c == nil {
 		return nil
 	}
-
+	log.Printf("close RemoteAdd:%s", cc.c.RemoteAddr().String())
 	if err := cc.c.Close(); err != nil {
 		return err
 	}
-
-	cc.closed = true
-
+	cc.c = nil
 	return nil
 }
 func (cc *ClientConn) isAllowConnect() bool {
@@ -595,7 +592,6 @@ func (cc *ClientConn) run(ctx context.Context) {
 			buf = buf[:runtime.Stack(buf, false)]
 			log.Printf("Error ClientConn.Run [%s] stak:%s", err.Error(), string(buf))
 		}
-
 		cc.close()
 	}()
 
@@ -604,6 +600,7 @@ func (cc *ClientConn) run(ctx context.Context) {
 	db := cc.node
 	if err := pc.connect(db.Addr, db.User, db.Password, db.Db); err != nil {
 		log.Printf("pc.connect err:%s", err)
+		return
 	}
 	log.Printf("Success Connect. toAddr:%s", pc.conn.RemoteAddr())
 

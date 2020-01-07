@@ -91,6 +91,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&conf.Net, "net", conf.Net, "Listen net ['tcp' or 'unix'] ")
 	rootCmd.PersistentFlags().StringVar(&conf.Addr, "listen", conf.Addr, "Listen address [ip or hostname or socketFileName] ")
 	rootCmd.PersistentFlags().StringVar(&conf.LogFileName, "log", conf.LogFileName, "logfile path")
+	rootCmd.PersistentFlags().BoolVar(&conf.LogGzip, "logGzip", conf.LogGzip, "Gzip compress log files")
 	rootCmd.PersistentFlags().DurationVar(&conf.RotateTime, "rotate", conf.RotateTime, "logfile rotatetime")
 	rootCmd.PersistentFlags().IntVar(&conf.QueueSize, "q", conf.QueueSize, "max log buffer queues")
 	rootCmd.PersistentFlags().StringVar(&conf.BufSize, "buf", conf.BufSize, "buffer size")
@@ -98,7 +99,7 @@ func init() {
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	// rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
 
 // initConfig reads in config file and ENV variables if set.

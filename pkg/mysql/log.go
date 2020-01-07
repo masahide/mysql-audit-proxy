@@ -1,9 +1,11 @@
 package mysql
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -12,9 +14,13 @@ import (
 
 type auditLogs struct {
 	FileName   string
+	Gzip       bool
 	RotateTime time.Duration
 	Queue      chan *SendPackets
 	Bs         *buffers
+
+	gz io.WriteCloser
+	f  *os.File
 }
 
 /*
@@ -38,27 +44,60 @@ func time2Path(p string, t time.Time) string {
 	return p
 }
 
+func (a *auditLogs) openStream(t time.Time) (f io.WriteCloser, err error) {
+	name := time2Path(a.FileName, t)
+	if a.Gzip {
+		name = name + ".gz"
+	}
+	a.f, err = os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+	if !a.Gzip {
+		return a.f, nil
+	}
+	a.gz = gzip.NewWriter(a.f)
+	return a.gz, nil
+}
+func (a *auditLogs) closeStream() (err error) {
+	if a.gz != nil {
+		err = a.gz.Close()
+		if err != nil {
+			return
+		}
+		a.gz = nil
+	}
+	if a.f == nil {
+		return nil
+	}
+	err = a.f.Close()
+	if err != nil {
+		return err
+	}
+	a.f = nil
+	return nil
+}
+
 func (a auditLogs) logWorker(ctx context.Context, res chan error) {
 	var err error
-	var f *os.File
-	defer func() { res <- err; close(res) }()
-	if f, err = os.Create(time2Path(a.FileName, time.Now())); err != nil {
+	var w io.Writer
+	defer func() { a.closeStream(); res <- err; close(res) }()
+	if w, err = a.openStream(time.Now()); err != nil {
 		return
 	}
-	defer f.Close()
-	e := json.NewEncoder(f)
+	e := json.NewEncoder(w)
 	tt := time.NewTicker(a.RotateTime)
 	defer tt.Stop()
 	for {
 		select {
 		case t := <-tt.C:
-			f.Close()
-			name := time2Path(a.FileName, t)
-			f, err = os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
-			if err != nil {
+			if err = a.closeStream(); err != nil {
 				return
 			}
-			e = json.NewEncoder(f)
+			if w, err = a.openStream(t); err != nil {
+				return
+			}
+			e = json.NewEncoder(w)
 		case <-ctx.Done():
 			for p := range a.Queue {
 				if err = e.Encode(p); err != nil {
