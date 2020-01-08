@@ -1,0 +1,77 @@
+on: release
+name: Build release package
+jobs:
+  proxy-linux-amd64:
+    name: linux-amd64
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: build,gzip and release
+      uses: masahide/golang-release-action@master
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GOARCH: amd64
+        GOOS: linux
+  proxy-darwin-amd64:
+    name: darwin-amd64
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: build,gzip and release
+      uses: masahide/golang-release-action@master
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GOARCH: amd64
+        GOOS: darwin
+  proxy-windows-amd64:
+    name: windows-amd64
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: build,gzip and release
+      uses: masahide/golang-release-action@master
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GOARCH: amd64
+        GOOS: windows
+        BUILD_DIR: decoder
+        BIN_NAME: decoder
+  decoder-linux-amd64:
+    name: linux-amd64
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: build,gzip and release
+      uses: masahide/golang-release-action@master
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GOARCH: amd64
+        GOOS: linux
+        BUILD_DIR: decoder
+        BIN_NAME: decoder
+  decoder-darwin-amd64:
+    name: darwin-amd64
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: build,gzip and release
+      uses: masahide/golang-release-action@master
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GOARCH: amd64
+        GOOS: darwin
+        BUILD_DIR: decoder
+        BIN_NAME: decoder
+  decoder-windows-amd64:
+    name: windows-amd64
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: build,gzip and release
+      uses: masahide/golang-release-action@master
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GOARCH: amd64
+        GOOS: windows
+        BUILD_DIR: decoder
+        BIN_NAME: decoder
