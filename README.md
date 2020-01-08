@@ -2,6 +2,11 @@
 Proxy for mysql audit recording
 
 
+Download
+-------------
+
+[release page](https://github.com/masahide/mysql-audit-proxy/releases)
+
 Usage:
 ---------
 
