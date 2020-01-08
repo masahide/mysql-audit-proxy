@@ -8,6 +8,8 @@ require (
 	github.com/masahide/rcp v0.4.4
 	github.com/mattn/go-colorable v0.1.4 // indirect
 	github.com/mitchellh/go-homedir v1.1.0
+	github.com/pascaldekloe/colfer v1.7.2 // indirect
+	github.com/pascaldekloe/name v1.0.0 // indirect
 	github.com/siddontang/mixer v0.0.0-20151010030726-2e99afd4fe8e
 	github.com/spf13/cobra v0.0.5
 	github.com/spf13/viper v1.6.1

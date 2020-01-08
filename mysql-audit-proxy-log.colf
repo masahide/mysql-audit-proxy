@@ -1,0 +1,12 @@
+package mysql
+type SendPackets struct {
+	Datetime     timestamp
+	ConnectionID uint32    
+	User         text    
+	Db           text    
+	Addr         text    
+	State        text    
+	Err          text    
+	Packets      binary
+	Cmd          text    
+}

@@ -3,7 +3,9 @@ package mysql
 import (
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +17,7 @@ import (
 type auditLogs struct {
 	FileName   string
 	Gzip       bool
+	JSON       bool
 	RotateTime time.Duration
 	Queue      chan *SendPackets
 	Bs         *buffers
@@ -78,14 +81,25 @@ func (a *auditLogs) closeStream() (err error) {
 	return nil
 }
 
-func (a auditLogs) logWorker(ctx context.Context, res chan error) {
+type encoder interface {
+	Encode(interface{}) error
+}
+
+func (a *auditLogs) newEncoder(w io.Writer) encoder {
+	if !a.JSON {
+		return newColferWriter(w)
+	}
+	return json.NewEncoder(w)
+}
+
+func (a *auditLogs) logWorker(ctx context.Context, res chan error) {
 	var err error
 	var w io.Writer
 	defer func() { a.closeStream(); res <- err; close(res) }()
 	if w, err = a.openStream(time.Now()); err != nil {
 		return
 	}
-	e := json.NewEncoder(w)
+	e := a.newEncoder(w)
 	tt := time.NewTicker(a.RotateTime)
 	defer tt.Stop()
 	for {
@@ -97,7 +111,7 @@ func (a auditLogs) logWorker(ctx context.Context, res chan error) {
 			if w, err = a.openStream(t); err != nil {
 				return
 			}
-			e = json.NewEncoder(w)
+			e = a.newEncoder(w)
 		case <-ctx.Done():
 			for p := range a.Queue {
 				if err = e.Encode(p); err != nil {
@@ -118,3 +132,79 @@ func (a auditLogs) logWorker(ctx context.Context, res chan error) {
 		}
 	}
 }
+
+type colferWriter struct {
+	output  io.Writer
+	dataBuf []byte
+}
+
+func newColferWriter(w io.Writer) *colferWriter {
+	c := &colferWriter{
+		output:  w,
+		dataBuf: make([]byte, ColferSizeMax),
+	}
+	return c
+}
+
+// Encode SendPackets data
+func (c *colferWriter) Encode(s interface{}) error {
+	sp, ok := s.(*SendPackets)
+	if !ok {
+		return errors.New("not suport type")
+	}
+	size := sp.MarshalTo(c.dataBuf)
+	err := binary.Write(c.output, binary.LittleEndian, size)
+	if err != nil {
+		return err
+	}
+	_, err = c.output.Write(c.dataBuf[:size])
+	return err
+}
+
+type colferReader struct {
+	input   io.Reader
+	dataBuf []byte
+}
+
+func newColferReader(r io.Reader) *colferReader {
+	c := &colferReader{
+		input:   r,
+		dataBuf: make([]byte, ColferSizeMax),
+	}
+	return c
+}
+
+func (c *colferReader) decode(s *SendPackets) error {
+	var size int
+	err := binary.Read(c.input, binary.LittleEndian, &size)
+	if err != nil {
+		return err
+	}
+	_, err = c.input.Read(c.dataBuf[:size])
+	if err != nil {
+		return err
+	}
+	_, err = s.Unmarshal(c.dataBuf[:size])
+	return err
+}
+
+/*
+func main() {
+	x := uint64(12345678)
+	b := make([]byte, binary.MaxVarintLen64)
+	n := binary.PutUvarint(b, x)
+	fmt.Println(b[:n]) // -> [206 194 241 5]
+
+	b = append(b[:n], []byte{3, 2, 2, 1, 2}...)
+
+	fmt.Println(b) // -> [206 194 241 5]
+
+	buf := bytes.NewReader(b)
+	i, err := binary.ReadUvarint(buf)
+	fmt.Printf("i=%d, err=%v\n", i, err)
+	a := make([]byte, 100)
+	size, err := buf.Read(a)
+	fmt.Printf("buf.Read(a)-> size=%d, err=%v, a[:size]=[%# x]\n", size, err, a[:size])
+}
+
+*/

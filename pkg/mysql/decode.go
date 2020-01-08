@@ -88,6 +88,12 @@ func Decode(out io.Writer, in io.Reader) error {
 }
 
 func (c *conbuf) dispatch(data []byte) string {
+	if data == nil {
+		return "data == nil"
+	}
+	if len(data) <= 1 {
+		return "len(data)<=1"
+	}
 	cmd := data[0]
 	data = data[1:]
 
@@ -130,13 +136,15 @@ func (c *conbuf) readPacket() ([]byte, error) {
 		return nil, fmt.Errorf("invalid payload length %d", length)
 	}
 
-	sequence := uint8(header[3])
+	/*
+		sequence := uint8(header[3])
 
-	if sequence != c.sequence {
-		return nil, fmt.Errorf("invalid sequence %d != %d", sequence, c.sequence)
-	}
+		if sequence != c.sequence {
+			return nil, fmt.Errorf("invalid sequence %d != %d", sequence, c.sequence)
+		}
 
-	c.sequence++
+		c.sequence++
+	*/
 
 	data := make([]byte, length)
 	if _, err := io.ReadFull(c.in, data); err != nil {

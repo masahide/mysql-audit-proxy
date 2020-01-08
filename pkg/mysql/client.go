@@ -226,9 +226,9 @@ func (c *ProxyClient) writeAuthHandshake() error {
 
 	// db [null terminated string]
 	if len(c.db) > 0 {
-		copy(data[pos:], c.db)
-		//pos += copy(data[pos:], c.db)
-		//data[pos] = 0x00
+		// copy(data[pos:], c.db)
+		pos += copy(data[pos:], c.db)
+		data[pos] = 0x00
 	}
 
 	return c.writePacket(data)

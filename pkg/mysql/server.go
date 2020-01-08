@@ -75,20 +75,6 @@ type buffers struct {
 	pool  sync.Pool
 }
 
-// SendPackets tx packets
-type SendPackets struct {
-	Datetime     time.Time `json:"time"`
-	ConnectionID uint32    `json:"id,omitempty"`
-	User         string    `json:"user,omitempty"`
-	Db           string    `json:"db,omitempty"`
-	Addr         string    `json:"addr,omitempty"`
-	State        string    `json:"state,omitempty"`
-	Err          string    `json:"err,omitempty"`
-	Packets      []byte    `json:"packets,omitempty"`
-	Cmd          string    `json:"cmd,omitempty"`
-	buf          []byte
-}
-
 func newBuffers(size, n int) *buffers {
 	bs := buffers{}
 	bs.limit = make(chan struct{}, n)
@@ -504,9 +490,8 @@ func (cc *ClientConn) getNode() error {
 		User:     matches[1],
 		Password: matches[2],
 		Addr:     matches[3],
-		Db:       matches[5],
 	}
-	log.Printf("user:[%s] passwd[xxx] host:[%s] database:[%s]", cc.node.Addr, cc.node.User, cc.node.Db)
+	log.Printf("user:[%s] passwd[xxx] host:[%s]", cc.node.Addr, cc.node.User)
 	return nil
 }
 func (cc *ClientConn) readHandshakeResponse() error {
