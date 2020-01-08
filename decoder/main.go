@@ -2,12 +2,12 @@ package main
 
 import (
 	"bytes"
-	"flag"
 	"io"
 	"log"
 	"os"
 
 	"github.com/masahide/mysql-audit-proxy/pkg/mysql"
+	flag "github.com/spf13/pflag"
 )
 
 const (
@@ -21,6 +21,8 @@ type conbuf struct {
 }
 
 func main() {
+	var jsonFlag bool
+	flag.BoolVar(&jsonFlag, "json", jsonFlag, "json log file mode")
 	flag.Parse()
 	args := flag.Args()
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -36,7 +38,8 @@ func main() {
 			log.Fatal(err)
 		}
 	}
-	if err := mysql.Decode(os.Stdout, in); err != nil {
+	l := &mysql.LogDecoder{JSON: jsonFlag}
+	if err := l.Decode(os.Stdout, in); err != nil {
 		log.Fatal(err)
 	}
 }

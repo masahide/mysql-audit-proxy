@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"bufio"
 	"compress/gzip"
 	"context"
 	"encoding/binary"
@@ -14,10 +15,12 @@ import (
 	"time"
 )
 
+// auditLogs audit log struct
 type auditLogs struct {
 	FileName   string
 	Gzip       bool
 	JSON       bool
+	MaxBufSize int
 	RotateTime time.Duration
 	Queue      chan *SendPackets
 	Bs         *buffers
@@ -95,6 +98,7 @@ func (a *auditLogs) newEncoder(w io.Writer) encoder {
 func (a *auditLogs) logWorker(ctx context.Context, res chan error) {
 	var err error
 	var w io.Writer
+	ColferSizeMax = a.MaxBufSize << 1
 	defer func() { a.closeStream(); res <- err; close(res) }()
 	if w, err = a.openStream(time.Now()); err != nil {
 		return
@@ -150,10 +154,11 @@ func newColferWriter(w io.Writer) *colferWriter {
 func (c *colferWriter) Encode(s interface{}) error {
 	sp, ok := s.(*SendPackets)
 	if !ok {
-		return errors.New("not suport type")
+		return errors.New("not support data type")
 	}
-	size := sp.MarshalTo(c.dataBuf)
-	err := binary.Write(c.output, binary.LittleEndian, size)
+	size := uint64(sp.MarshalTo(c.dataBuf))
+	lenSize := binary.PutUvarint(c.dataBuf[size:], size)
+	_, err := c.output.Write(c.dataBuf[size : int(size)+lenSize])
 	if err != nil {
 		return err
 	}
@@ -162,21 +167,37 @@ func (c *colferWriter) Encode(s interface{}) error {
 }
 
 type colferReader struct {
-	input   io.Reader
+	input   *bufio.Reader
 	dataBuf []byte
+}
+
+type decoder interface {
+	Decode(interface{}) error
 }
 
 func newColferReader(r io.Reader) *colferReader {
 	c := &colferReader{
-		input:   r,
+		input:   bufio.NewReader(r),
 		dataBuf: make([]byte, ColferSizeMax),
 	}
 	return c
 }
 
+func (a *auditLogs) newDecoder(r io.Reader) decoder {
+	if !a.JSON {
+		return newColferReader(r)
+	}
+	return json.NewDecoder(r)
+}
+func (c *colferReader) Decode(s interface{}) error {
+	sp, ok := s.(*SendPackets)
+	if !ok {
+		return errors.New("not support data type")
+	}
+	return c.decode(sp)
+}
 func (c *colferReader) decode(s *SendPackets) error {
-	var size int
-	err := binary.Read(c.input, binary.LittleEndian, &size)
+	size, err := binary.ReadUvarint(c.input)
 	if err != nil {
 		return err
 	}

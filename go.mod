@@ -12,5 +12,6 @@ require (
 	github.com/pascaldekloe/name v1.0.0 // indirect
 	github.com/siddontang/mixer v0.0.0-20151010030726-2e99afd4fe8e
 	github.com/spf13/cobra v0.0.5
+	github.com/spf13/pflag v1.0.3
 	github.com/spf13/viper v1.6.1
 )

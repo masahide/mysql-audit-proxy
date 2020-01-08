@@ -38,8 +38,8 @@ var (
 		Addr:            "localhost:3330",
 		LogFileName:     "mysql-audit.%Y%m%d%H.log",
 		RotateTime:      1 * time.Hour,
-		QueueSize:       4096,
-		BufSize:         "10mb",
+		QueueSize:       200,
+		BufSize:         "32mb",
 		BufferFlushTime: 1 * time.Second,
 	}
 )

@@ -139,6 +139,7 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 		Queue:      s.queue,
 		Bs:         s.bs,
 		Gzip:       s.cfg.LogGzip,
+		MaxBufSize: s.bufSize,
 	}
 	return s, nil
 }

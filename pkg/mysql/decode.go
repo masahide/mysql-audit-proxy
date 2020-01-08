@@ -20,6 +20,11 @@ type conbuf struct {
 	sequence uint8
 }
 
+// LogDecoder struct
+type LogDecoder struct {
+	JSON bool
+}
+
 func writeErr(enc *json.Encoder, sp *SendPackets, err error) error {
 	out := SendPackets{
 		Datetime:     sp.Datetime,
@@ -35,8 +40,12 @@ func writeErr(enc *json.Encoder, sp *SendPackets, err error) error {
 }
 
 // Decode stream
-func Decode(out io.Writer, in io.Reader) error {
-	dec := json.NewDecoder(in)
+func (l *LogDecoder) Decode(out io.Writer, in io.Reader) error {
+	a := &auditLogs{
+		JSON: l.JSON,
+	}
+	dec := a.newDecoder(in)
+	//dec := json.NewDecoder(in)
 	enc := json.NewEncoder(out)
 	for {
 		sp := &SendPackets{}
