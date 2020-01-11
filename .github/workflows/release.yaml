@@ -34,8 +34,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         GOARCH: amd64
         GOOS: windows
-        BUILD_DIR: decoder
-        BIN_NAME: decoder
   decoder-linux-amd64:
     name: linux-amd64
     runs-on: ubuntu-latest
