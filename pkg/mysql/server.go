@@ -492,7 +492,7 @@ func (cc *ClientConn) getNode() error {
 		Password: matches[2],
 		Addr:     matches[3],
 	}
-	log.Printf("user:[%s] passwd[xxx] host:[%s]", cc.node.Addr, cc.node.User)
+	log.Printf("user:[%s] passwd[xxx] host:[%s]", cc.node.User, cc.node.Addr)
 	return nil
 }
 func (cc *ClientConn) readHandshakeResponse() error {
