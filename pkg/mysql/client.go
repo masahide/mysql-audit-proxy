@@ -15,7 +15,6 @@ import (
 
 //ProxyClient proxy <-> mysql server
 type ProxyClient struct {
-	//client     *ClientConn
 	conn       net.Conn
 	pkg        *mysql.PacketIO
 	addr       string
