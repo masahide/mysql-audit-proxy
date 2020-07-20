@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"time"
@@ -14,7 +15,6 @@ import (
 
 //ProxyClient proxy <-> mysql server
 type ProxyClient struct {
-	client     *ClientConn
 	conn       net.Conn
 	pkg        *mysql.PacketIO
 	addr       string
@@ -42,6 +42,18 @@ func (c *ProxyClient) connect(addr string, user string, password string, db stri
 	c.charset = mysql.DEFAULT_CHARSET
 
 	return c.reConnect()
+}
+func (c *ProxyClient) Close() error {
+	if c.conn == nil {
+		return nil
+	}
+	log.Printf("close server ip:%s", c.conn.RemoteAddr().String())
+	err := c.conn.Close()
+	if err != nil {
+		return err
+	}
+	c.conn = nil
+	return nil
 }
 
 func (c *ProxyClient) reConnect() error {

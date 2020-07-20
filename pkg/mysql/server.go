@@ -182,7 +182,7 @@ func (s *Server) newClientConn(conn net.Conn) *ClientConn {
 }
 
 func (s *Server) onConn(ctx context.Context, c net.Conn) {
-	clConn := s.newClientConn(c)
+	cc := s.newClientConn(c)
 
 	defer func() {
 		err := recover()
@@ -192,24 +192,24 @@ func (s *Server) onConn(ctx context.Context, c net.Conn) {
 			log.Printf("Error server.onConn remoteAddr:%s, stack:%s", c.RemoteAddr().String(), string(buf))
 		}
 
-		clConn.close()
+		cc.close()
 	}()
 
-	if allowConnect := clConn.isAllowConnect(); allowConnect {
+	if allowConnect := cc.isAllowConnect(); allowConnect {
 		err := mysql.NewError(mysql.ER_ACCESS_DENIED_ERROR, "ip address access denied by mysqlproxy.")
-		if err := clConn.writeError(err); err != nil {
+		if err := cc.writeError(err); err != nil {
 			log.Printf("onConn.writeError:%s", err)
 		}
-		clConn.close()
+		cc.close()
 		return
 	}
-	if err := clConn.handshake(); err != nil {
+	if err := cc.handshake(); err != nil {
 		log.Printf("Error server.onConn  %s", err.Error())
 		c.Close()
 		return
 	}
 
-	clConn.run(ctx)
+	cc.run(ctx)
 }
 
 func (s *Server) parseAllowIps() {
@@ -279,7 +279,7 @@ func (cc *ClientConn) close() error {
 	if cc.c == nil {
 		return nil
 	}
-	log.Printf("close RemoteAdd:%s", cc.c.RemoteAddr().String())
+	log.Printf("close client ip:%s", cc.c.RemoteAddr().String())
 	if err := cc.c.Close(); err != nil {
 		return err
 	}
@@ -582,7 +582,7 @@ func (cc *ClientConn) run(ctx context.Context) {
 	}()
 
 	log.Printf("Success Handshake. fromAddr:%s", cc.c.RemoteAddr())
-	pc := ProxyClient{client: cc}
+	pc := ProxyClient{}
 	db := cc.node
 	if err := pc.connect(db.Addr, db.User, db.Password, db.Db); err != nil {
 		log.Printf("pc.connect err:%s", err)
@@ -605,6 +605,10 @@ func (cc *ClientConn) run(ctx context.Context) {
 		wg.Done()
 	}()
 	wg.Wait()
+	err := pc.Close()
+	if err != nil {
+		log.Printf("ProxyClient Close err:%s", err)
+	}
 	// nolint: errcheck
 	cc.sendState(ctx, "disconnect")
 }
