@@ -1,4 +1,7 @@
-on: release
+on:
+  release:
+    types: [released]
+
 name: Build release package
 jobs:
   proxy-linux-amd64:
