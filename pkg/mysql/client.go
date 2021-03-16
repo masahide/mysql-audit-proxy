@@ -177,7 +177,7 @@ func (c *ProxyClient) readInitialHandshake() error {
 
 func (c *ProxyClient) writeAuthHandshake() error {
 	// Adjust client capability flags based on server support
-	capability := mysql.CLIENT_PROTOCOL_41 | mysql.CLIENT_SECURE_CONNECTION |
+	capability := mysql.CLIENT_PROTOCOL_41 | mysql.CLIENT_SECURE_CONNECTION | mysql.CLIENT_LOCAL_FILES |
 		mysql.CLIENT_LONG_PASSWORD | mysql.CLIENT_TRANSACTIONS | mysql.CLIENT_LONG_FLAG
 
 	capability &= c.capability
