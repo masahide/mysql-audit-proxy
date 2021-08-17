@@ -33,7 +33,7 @@ func writeErr(enc *json.Encoder, sp *SendPackets, err error) error {
 		Db:           sp.Db,
 		Addr:         sp.Addr,
 		State:        sp.State,
-		Packets:      sp.Packets,
+		Cmd:          string(sp.Packets),
 		Err:          err.Error(),
 	}
 	return enc.Encode(out)
@@ -53,9 +53,12 @@ func (l *LogDecoder) Decode(out io.Writer, in io.Reader) error {
 			if err == io.EOF {
 				break
 			}
-			if err := writeErr(enc, sp, err); err != nil {
-				return err
-			}
+			return err
+			/*
+				if err := writeErr(enc, sp, err); err != nil {
+					return err
+				}
+			*/
 		}
 		if sp.State != "est" {
 			if err := enc.Encode(sp); err != nil {
@@ -71,9 +74,12 @@ func (l *LogDecoder) Decode(out io.Writer, in io.Reader) error {
 				if err == io.EOF {
 					break
 				}
-				if err := writeErr(enc, sp, err); err != nil {
-					return err
-				}
+				/*
+					if err := writeErr(enc, sp, err); err != nil {
+						return err
+					}
+				*/
+				return err
 			}
 			out := SendPackets{
 				Datetime:     sp.Datetime,

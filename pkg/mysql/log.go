@@ -201,6 +201,9 @@ func (c *colferReader) decode(s *SendPackets) error {
 	if err != nil {
 		return err
 	}
+	if len(c.dataBuf) < int(size) {
+		return fmt.Errorf("The buffer size has been exceeded. size:%d  > len(dataBuf)=%d", size, len(c.dataBuf))
+	}
 	_, err = c.input.Read(c.dataBuf[:size])
 	if err != nil {
 		return err

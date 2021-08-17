@@ -15,7 +15,7 @@ var intconv = binary.BigEndian
 // Colfer configuration attributes
 var (
 	// ColferSizeMax is the upper limit for serial byte sizes.
-	ColferSizeMax = 2 * 1024 * 1024 * 1024
+	ColferSizeMax = 2 * 1024 * 1024 * 10
 )
 
 // ColferMax signals an upper limit breach.
@@ -47,9 +47,9 @@ type SendPackets struct {
 	User         string    `json:"user,omitempty"`
 	Db           string    `json:"db,omitempty"`
 	Addr         string    `json:"addr,omitempty"`
-	State        string    `json:"state,omitempty"`
-	Err          string    `json:"err,omitempty"`
-	Packets      []byte    `json:"packets,omitempty"`
+	State        string    `json:"state,omitempty"`   // 5
+	Err          string    `json:"err,omitempty"`     // 6
+	Packets      []byte    `json:"packets,omitempty"` // 7
 	Cmd          string    `json:"cmd,omitempty"`
 	buf          []byte
 }
