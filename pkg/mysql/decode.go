@@ -2,7 +2,6 @@ package mysql
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 
@@ -18,88 +17,6 @@ type conbuf struct {
 	in       *bytes.Buffer
 	readSize int64
 	sequence uint8
-}
-
-// LogDecoder struct
-type LogDecoder struct {
-	JSON bool
-}
-
-func writeErr(enc *json.Encoder, sp *SendPackets, err error) error {
-	out := SendPackets{
-		Datetime:     sp.Datetime,
-		ConnectionID: sp.ConnectionID,
-		User:         sp.User,
-		Db:           sp.Db,
-		Addr:         sp.Addr,
-		State:        sp.State,
-		Cmd:          string(sp.Packets),
-		Err:          err.Error(),
-	}
-	return enc.Encode(out)
-}
-
-// Decode stream
-func (l *LogDecoder) Decode(out io.Writer, in io.Reader) error {
-	a := &auditLogs{
-		JSON: l.JSON,
-	}
-	dec := a.newDecoder(in)
-	//dec := json.NewDecoder(in)
-	enc := json.NewEncoder(out)
-	for {
-		sp := &SendPackets{}
-		if err := dec.Decode(sp); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return err
-			/*
-				if err := writeErr(enc, sp, err); err != nil {
-					return err
-				}
-			*/
-		}
-		if sp.State != "est" {
-			if err := enc.Encode(sp); err != nil {
-				return err
-			}
-		}
-		cb := &conbuf{
-			in: bytes.NewBuffer(sp.Packets),
-		}
-		for {
-			data, err := cb.readPacket()
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				/*
-					if err := writeErr(enc, sp, err); err != nil {
-						return err
-					}
-				*/
-				return err
-			}
-			out := SendPackets{
-				Datetime:     sp.Datetime,
-				ConnectionID: sp.ConnectionID,
-				User:         sp.User,
-				Db:           sp.Db,
-				Addr:         sp.Addr,
-				State:        sp.State,
-				Cmd:          cb.dispatch(data),
-			}
-			err = enc.Encode(out)
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 func (c *conbuf) dispatch(data []byte) string {

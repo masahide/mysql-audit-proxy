@@ -79,7 +79,7 @@ func decoder(filename string) {
 		log.Printf("fle: %s, err: %s", filename, err)
 		return
 	}
-	l := &mysql.LogDecoder{JSON: jsonFlag}
+	l := &mysql.LogDecoder{JSON: jsonFlag, EncodeType: mysql.DefaultEncodeType}
 	err = l.Decode(io.Discard, gzr)
 	gzr.Close()
 	in.Seek(0, 0)
