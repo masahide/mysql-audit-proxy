@@ -2,9 +2,11 @@ package mysql
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/binary"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,11 +17,29 @@ import (
 	"time"
 )
 
+const (
+	EncodeTypeColfer = 0x00
+	EncodeTypeRAW    = 0x01
+	EncodeTypeGOB    = 0xff
+
+	DefaultEncodeType = EncodeTypeGOB
+)
+
+var decoderMap = map[byte]func(c *BinaryReader, s *SendPackets) error{
+	EncodeTypeGOB: gobReader,
+}
+
+var encoderMap = map[byte]func(c *BinaryWriter, s interface{}) error{
+	EncodeTypeColfer: colferEncode,
+	EncodeTypeGOB:    gobEncode,
+}
+
 // auditLogs audit log struct
 type auditLogs struct {
 	FileName   string
 	Gzip       bool
 	JSON       bool
+	EncodeType byte
 	MaxBufSize int
 	RotateTime time.Duration
 	Queue      chan *SendPackets
@@ -84,17 +104,6 @@ func (a *auditLogs) closeStream() (err error) {
 	return nil
 }
 
-type encoder interface {
-	Encode(interface{}) error
-}
-
-func (a *auditLogs) newEncoder(w io.Writer) encoder {
-	if !a.JSON {
-		return newColferWriter(w)
-	}
-	return json.NewEncoder(w)
-}
-
 func (a *auditLogs) logWorker(ctx context.Context, res chan error) {
 	var err error
 	var w io.Writer
@@ -103,7 +112,7 @@ func (a *auditLogs) logWorker(ctx context.Context, res chan error) {
 	if w, err = a.openStream(time.Now()); err != nil {
 		return
 	}
-	e := a.newEncoder(w)
+	e := a.newLogEncoder(w, a.EncodeType)
 	tt := time.NewTicker(a.RotateTime)
 	defer tt.Stop()
 	for {
@@ -115,7 +124,7 @@ func (a *auditLogs) logWorker(ctx context.Context, res chan error) {
 			if w, err = a.openStream(t); err != nil {
 				return
 			}
-			e = a.newEncoder(w)
+			e = a.newLogEncoder(w, a.EncodeType)
 		case <-ctx.Done():
 			for p := range a.Queue {
 				if err = e.Encode(p); err != nil {
@@ -137,21 +146,157 @@ func (a *auditLogs) logWorker(ctx context.Context, res chan error) {
 	}
 }
 
-type colferWriter struct {
-	output  io.Writer
-	dataBuf []byte
+type logDecoder interface {
+	Decode(interface{}) error
 }
 
-func newColferWriter(w io.Writer) *colferWriter {
-	c := &colferWriter{
-		output:  w,
-		dataBuf: make([]byte, ColferSizeMax),
+// LogDecoder struct
+type LogDecoder struct {
+	JSON       bool
+	EncodeType byte
+}
+
+func writeErr(enc *json.Encoder, sp *SendPackets, err error) error {
+	out := SendPackets{
+		Datetime:     sp.Datetime,
+		ConnectionID: sp.ConnectionID,
+		User:         sp.User,
+		Db:           sp.Db,
+		Addr:         sp.Addr,
+		State:        sp.State,
+		Cmd:          string(sp.Packets),
+		Err:          err.Error(),
+	}
+	return enc.Encode(out)
+}
+
+// Decode stream
+func (l *LogDecoder) Decode(out io.Writer, in io.Reader) error {
+	a := &auditLogs{
+		JSON:       l.JSON,
+		EncodeType: l.EncodeType,
+	}
+	dec := a.newLogDecoder(in)
+	//dec := json.LogDecoder(in)
+	jsonEnc := json.NewEncoder(out)
+	for {
+		sp := &SendPackets{}
+		if err := dec.Decode(sp); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+			/*
+				if err := writeErr(jsonEnc, sp, err); err != nil {
+					return err
+				}
+			*/
+		}
+		if sp.State != "est" {
+			if err := jsonEnc.Encode(sp); err != nil {
+				return err
+			}
+		}
+		cb := &conbuf{
+			in: bytes.NewBuffer(sp.Packets),
+		}
+		for {
+			data, err := cb.readPacket()
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				/*
+					if err := writeErr(jsonEnc, sp, err); err != nil {
+						return err
+					}
+				*/
+				return err
+			}
+			out := SendPackets{
+				Datetime:     sp.Datetime,
+				ConnectionID: sp.ConnectionID,
+				User:         sp.User,
+				Db:           sp.Db,
+				Addr:         sp.Addr,
+				State:        sp.State,
+				Cmd:          cb.dispatch(data),
+			}
+			err = jsonEnc.Encode(out)
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (a *auditLogs) newLogDecoder(r io.Reader) logDecoder {
+	if !a.JSON {
+		return newBinaryReader(r)
+	}
+	return json.NewDecoder(r)
+}
+
+type logEncoder interface {
+	Encode(interface{}) error
+}
+
+func (a *auditLogs) newLogEncoder(w io.Writer, t byte) logEncoder {
+	if !a.JSON {
+		return newBinaryWriter(w, t)
+	}
+	return json.NewEncoder(w)
+}
+func newBinaryWriter(w io.Writer, t byte) logEncoder {
+	c := &BinaryWriter{
+		output:     w,
+		dataBuf:    make([]byte, ColferSizeMax),
+		buf:        &bytes.Buffer{},
+		encodeType: t,
 	}
 	return c
 }
 
+type BinaryWriter struct {
+	output     io.Writer
+	buf        *bytes.Buffer
+	dataBuf    []byte
+	encodeType byte
+}
+
 // Encode SendPackets data
-func (c *colferWriter) Encode(s interface{}) error {
+func (c *BinaryWriter) Encode(s interface{}) error {
+	if e, ok := encoderMap[c.encodeType]; ok {
+		return e(c, s)
+	}
+	return fmt.Errorf("not support encodetype:%x", c.encodeType)
+}
+func gobEncode(c *BinaryWriter, s interface{}) error {
+	// header
+	if _, err := c.output.Write([]byte{0, EncodeTypeGOB}); err != nil {
+		return err
+	}
+	sp, ok := s.(*SendPackets)
+	if !ok {
+		return errors.New("not support data type")
+	}
+	c.buf.Reset()
+	if err := gob.NewEncoder(c.buf).Encode(sp); err != nil {
+		return err
+	}
+	size := uint64(c.buf.Len())
+	lenSize := binary.PutUvarint(c.dataBuf, size)
+	if _, err := c.output.Write(c.dataBuf[:lenSize]); err != nil {
+		return err
+	}
+	_, err := io.Copy(c.output, c.buf)
+	return err
+}
+func colferEncode(c *BinaryWriter, s interface{}) error {
 	sp, ok := s.(*SendPackets)
 	if !ok {
 		return errors.New("not support data type")
@@ -166,37 +311,62 @@ func (c *colferWriter) Encode(s interface{}) error {
 	return err
 }
 
-type colferReader struct {
+type BinaryReader struct {
 	input   *bufio.Reader
 	dataBuf []byte
 }
 
-type decoder interface {
-	Decode(interface{}) error
-}
-
-func newColferReader(r io.Reader) *colferReader {
-	c := &colferReader{
+func newBinaryReader(r io.Reader) logDecoder {
+	c := &BinaryReader{
 		input:   bufio.NewReader(r),
 		dataBuf: make([]byte, ColferSizeMax),
 	}
 	return c
 }
 
-func (a *auditLogs) newDecoder(r io.Reader) decoder {
-	if !a.JSON {
-		return newColferReader(r)
+func gobReader(c *BinaryReader, s *SendPackets) error {
+	size, err := binary.ReadUvarint(c.input)
+	if err != nil {
+		return err
 	}
-	return json.NewDecoder(r)
+	dec := gob.NewDecoder(io.LimitReader(c.input, int64(size)))
+	if err != nil {
+		return err
+	}
+	return dec.Decode(s)
 }
-func (c *colferReader) Decode(s interface{}) error {
+
+func (c *BinaryReader) Decode(s interface{}) error {
 	sp, ok := s.(*SendPackets)
 	if !ok {
 		return errors.New("not support data type")
 	}
-	return c.decode(sp)
+	b, err := c.input.ReadByte()
+	if err == io.EOF {
+		return err
+	}
+	if err != nil {
+		return fmt.Errorf("not support data type: err read head:%v", err)
+	}
+	if b != 0 { // 0i以外はcolfer
+		c.input.UnreadByte()
+		return c.colferDecode(sp)
+	}
+	b, err = c.input.ReadByte()
+	if err == io.EOF {
+		return err
+	}
+	if err != nil {
+		return fmt.Errorf("not support data type: err read head:%v", err)
+	}
+	// デコーダーマップからlogデコーダーを選択
+	if dec, ok := decoderMap[b]; ok {
+		return dec(c, sp)
+	}
+	return fmt.Errorf("not support logEncode type: %x", b)
 }
-func (c *colferReader) decode(s *SendPackets) error {
+
+func (c *BinaryReader) colferDecode(s *SendPackets) error {
 	size, err := binary.ReadUvarint(c.input)
 	if err != nil {
 		return err
@@ -211,24 +381,3 @@ func (c *colferReader) decode(s *SendPackets) error {
 	_, err = s.Unmarshal(c.dataBuf[:size])
 	return err
 }
-
-/*
-func main() {
-	x := uint64(12345678)
-	b := make([]byte, binary.MaxVarintLen64)
-	n := binary.PutUvarint(b, x)
-	fmt.Println(b[:n]) // -> [206 194 241 5]
-
-	b = append(b[:n], []byte{3, 2, 2, 1, 2}...)
-
-	fmt.Println(b) // -> [206 194 241 5]
-
-	buf := bytes.NewReader(b)
-	i, err := binary.ReadUvarint(buf)
-	fmt.Printf("i=%d, err=%v\n", i, err)
-	a := make([]byte, 100)
-	size, err := buf.Read(a)
-	fmt.Printf("buf.Read(a)-> size=%d, err=%v, a[:size]=[%# x]\n", size, err, a[:size])
-}
-
-*/

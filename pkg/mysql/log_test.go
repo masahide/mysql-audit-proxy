@@ -12,8 +12,6 @@ import (
 	"os"
 	"testing"
 	"time"
-
-	"github.com/k0kubun/pp"
 )
 
 const (
@@ -45,6 +43,7 @@ func TestLogWorker(t *testing.T) {
 		FileName:   tmpFile.Name(),
 		RotateTime: time.Hour,
 		Queue:      queue,
+		EncodeType: EncodeTypeGOB,
 		Bs:         bs,
 		Gzip:       true,
 		MaxBufSize: bufSize,
@@ -60,18 +59,18 @@ func TestLogWorker(t *testing.T) {
 	for {
 		sp := &SendPackets{}
 		err := dec.Decode(sp)
-		if err != nil && err != io.EOF {
-			t.Fatal(err)
-		}
-		queue <- newSp(bs, sp)
 		if err == io.EOF {
 			break
 		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		queue <- newSp(bs, sp)
 	}
 	cancel()
 	close(queue)
 	if err := <-logErrCh; err != nil {
-		t.Errorf("logWorker err:%s", err)
+		t.Fatalf("logWorker err:%s", err)
 	}
 	f.Close()
 	cmpStructs(tmpFile.Name()+".gz", t)
@@ -82,10 +81,11 @@ func cmpStructs(filename string, t *testing.T) {
 	in, _ := os.Open(filename)
 	gzr, _ := gzip.NewReader(in)
 	a := &auditLogs{JSON: false}
-	dec := a.newDecoder(gzr)
+	dec := a.newLogDecoder(gzr)
 	dataf, _ := os.Open(testDataFile)
 	defer dataf.Close()
 	orgDec := json.NewDecoder(dataf)
+	i := 1
 	for {
 		sp := &SendPackets{}
 		org := &SendPackets{}
@@ -98,19 +98,27 @@ func cmpStructs(filename string, t *testing.T) {
 			return
 		}
 		err := orgDec.Decode(org)
+		//////////////////pp.Println(i, org, sp)
+		if err == io.EOF {
+			log.Println("data read:EOF")
+			break
+		}
 		if err != nil {
 			t.Fatalf("org Decode err:%s", err)
 			return
 		}
-		pp.Println(org, sp)
 		if diff := spcmp(org, sp); diff != "" {
-			t.Errorf("MakeGatewayInfo() mismatch (-want +got):\n%s", diff)
+			t.Errorf("%v MakeGatewayInfo() mismatch (-want +got):\n%s", i, diff)
 		}
+		i++
 	}
 }
 
 func spcmp(a, b *SendPackets) string {
 	res := ""
+	if a.Datetime.Unix() != b.Datetime.Unix() {
+		res = fmt.Sprintf("Datetime %v : %v\n", a.Datetime, b.Datetime)
+	}
 	if a.ConnectionID != b.ConnectionID {
 		res = fmt.Sprintf("ConnectionID %v : %v\n", a.ConnectionID, b.ConnectionID)
 	}
@@ -149,4 +157,30 @@ func decode(filename string, t *testing.T) {
 		t.Error(err)
 	}
 	l.Decode(os.Stdout, gzr)
+}
+
+func TestEncode(t *testing.T) {
+	//b := []byte{}
+
+	buf := &bytes.Buffer{}
+	w := newBinaryWriter(buf, EncodeTypeColfer)
+	packet := &SendPackets{
+		ConnectionID: 1,
+		User:         "user01",
+	}
+	//packet.User = strings.Repeat("a", 1000000)
+	if err := w.Encode(packet); err != nil {
+		t.Error(err)
+	}
+	//pp.Println(buf.Bytes())
+	buf.Reset()
+	packet = &SendPackets{}
+	//packet.User = strings.Repeat("a", 1000000)
+	if err := w.Encode(packet); err != nil {
+		t.Error(err)
+	}
+	firstByte := buf.Bytes()[0]
+	if firstByte != byte(1) {
+		t.Errorf("first byte is not 1. first byte:%v", firstByte)
+	}
 }
