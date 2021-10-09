@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -631,7 +632,21 @@ func (cc *ClientConn) getSendPackets() *SendPackets {
 	return sp
 }
 
+func putDebugData(data interface{}) {
+	file, err := os.OpenFile("tmplog.json", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0666)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+	enc := json.NewEncoder(file)
+	err = enc.Encode(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
 func (cc *ClientConn) postData(ctx context.Context, sp *SendPackets) error {
+	putDebugData(sp) // TODO: debug
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

@@ -84,6 +84,7 @@ func decoder(filename string) {
 	gzr.Close()
 	in.Seek(0, 0)
 	if err != nil {
+		log.Printf("err:%s", err)
 		log.Printf("%s --- Log data corruption was found, so switch to forced parsing..", filename)
 		gzr, err := gzip.NewReader(in)
 		if err != nil {
