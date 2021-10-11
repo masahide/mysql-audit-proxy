@@ -4,6 +4,8 @@ go 1.13
 
 require (
 	github.com/BurntSushi/toml v0.4.1
+	github.com/andyleap/gencode v0.0.0-20171124163308-e1423834d4b4 // indirect
+	github.com/andyleap/parser v0.0.0-20160126201130-db5a13a7cd46 // indirect
 	github.com/go-sql-driver/mysql v1.6.0
 	github.com/google/go-cmp v0.5.6 // indirect
 	github.com/k0kubun/pp v3.0.1+incompatible

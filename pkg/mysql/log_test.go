@@ -12,38 +12,82 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/masahide/mysql-audit-proxy/pkg/gencode"
 )
 
 const (
-	testDataFile = "test/testinputdata.json"
+	testDataFile1 = "test/testinputdata1.json"
+	testDataFile2 = "test/testinputdata2.json"
 )
 
-func newSp(bs *buffers, org *SendPackets) *SendPackets {
-	sp := bs.Get()
-	sp.Datetime = org.Datetime
-	sp.User = org.User
-	sp.Db = org.Db
-	sp.Addr = org.Addr
-	sp.ConnectionID = org.ConnectionID
-	sp.State = org.State
-	sp.Packets = org.Packets
-	return sp
+func init() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+}
+
+func TestLogWorker(t *testing.T) {
+	tests := []struct {
+		name         string
+		encType      byte
+		testDataFile string
+		result       bool
+	}{
+		{
+			name: "gob1", encType: EncodeTypeGOB,
+			testDataFile: testDataFile1,
+			result:       true,
+		},
+		{
+			name:         "colfer1",
+			encType:      EncodeTypeColfer,
+			testDataFile: testDataFile1,
+			result:       true,
+		},
+		{
+			name:         "gencode1",
+			encType:      EncodeTypeGencode,
+			testDataFile: testDataFile1,
+			result:       true,
+		},
+		{
+			name:         "gob2",
+			encType:      EncodeTypeGOB,
+			testDataFile: testDataFile2,
+			result:       true,
+		},
+		{
+			name:         "colfer2",
+			encType:      EncodeTypeColfer,
+			testDataFile: testDataFile2,
+			result:       true,
+		},
+		{
+			name:         "gencode2",
+			encType:      EncodeTypeGencode,
+			testDataFile: testDataFile2,
+			result:       true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testLogWorker(t, tt.encType, tt.testDataFile, tt.result)
+		})
+	}
 }
 
 // Run server main process
-func TestLogWorker(t *testing.T) {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+func testLogWorker(t *testing.T, encType byte, testDataFile string, result bool) {
 	tmpFile, _ := ioutil.TempFile("", "tmptest")
 	defer os.Remove(tmpFile.Name() + ".gz")
 
 	bufSize := 32 * 1024 * 1024
 	bs := newBuffers(bufSize, 200)
-	queue := make(chan *SendPackets, 200)
+	queue := make(chan *spBuffer, 1)
 	al := &auditLogs{
 		FileName:   tmpFile.Name(),
 		RotateTime: time.Hour,
 		Queue:      queue,
-		EncodeType: EncodeTypeGOB,
+		EncodeType: encType,
 		Bs:         bs,
 		Gzip:       true,
 		MaxBufSize: bufSize,
@@ -57,7 +101,7 @@ func TestLogWorker(t *testing.T) {
 	}
 	dec := json.NewDecoder(f)
 	for {
-		sp := &SendPackets{}
+		sp := &ColferSendPackets{}
 		err := dec.Decode(sp)
 		if err == io.EOF {
 			break
@@ -65,7 +109,7 @@ func TestLogWorker(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		queue <- newSp(bs, sp)
+		queue <- newSpBuffer(bs, sp)
 	}
 	cancel()
 	close(queue)
@@ -73,10 +117,16 @@ func TestLogWorker(t *testing.T) {
 		t.Fatalf("logWorker err:%s", err)
 	}
 	f.Close()
-	cmpStructs(tmpFile.Name()+".gz", t)
+	diff := cmpStructs(tmpFile.Name()+".gz", testDataFile, t)
+	if diff != "" && result {
+		t.Errorf(diff)
+	}
+	if diff == "" && !result {
+		t.Errorf("!!No Errors")
+	}
 }
 
-func cmpStructs(filename string, t *testing.T) {
+func cmpStructs(filename, testDataFile string, t *testing.T) string {
 
 	in, _ := os.Open(filename)
 	gzr, _ := gzip.NewReader(in)
@@ -87,36 +137,35 @@ func cmpStructs(filename string, t *testing.T) {
 	orgDec := json.NewDecoder(dataf)
 	i := 1
 	for {
-		sp := &SendPackets{}
-		org := &SendPackets{}
+		sp := &gencode.SendPackets{}
+		org := &ColferSendPackets{}
 		dataerr := dec.Decode(sp)
 		if dataerr == io.EOF {
 			break
 		}
 		if dataerr != nil {
-			t.Error(dataerr)
-			return
+			return dataerr.Error()
 		}
 		err := orgDec.Decode(org)
-		//////////////////pp.Println(i, org, sp)
 		if err == io.EOF {
 			log.Println("data read:EOF")
 			break
 		}
 		if err != nil {
 			t.Fatalf("org Decode err:%s", err)
-			return
 		}
+		//pp.Println(i, org, sp)
 		if diff := spcmp(org, sp); diff != "" {
-			t.Errorf("%v MakeGatewayInfo() mismatch (-want +got):\n%s", i, diff)
+			return fmt.Sprintf("%v mismatch (-want +got):\n%s", i, diff)
 		}
 		i++
 	}
+	return ""
 }
 
-func spcmp(a, b *SendPackets) string {
+func spcmp(a *ColferSendPackets, b *gencode.SendPackets) string {
 	res := ""
-	if a.Datetime.Unix() != b.Datetime.Unix() {
+	if a.Datetime.Unix() != b.Datetime {
 		res = fmt.Sprintf("Datetime %v : %v\n", a.Datetime, b.Datetime)
 	}
 	if a.ConnectionID != b.ConnectionID {
@@ -132,7 +181,7 @@ func spcmp(a, b *SendPackets) string {
 		res = fmt.Sprintf("Addr %v : %v\n", a.Addr, b.Addr)
 	}
 	if a.State != b.State {
-		res = fmt.Sprintf("State %v : %v\n", a.State, b.State)
+		res = fmt.Sprintf("State [%v] != [%v]\n", a.State, b.State)
 	}
 	if a.Err != b.Err {
 		res = fmt.Sprintf("Err %v : %v\n", a.Err, b.Err)
@@ -164,7 +213,7 @@ func TestEncode(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	w := newBinaryWriter(buf, EncodeTypeColfer)
-	packet := &SendPackets{
+	packet := &ColferSendPackets{
 		ConnectionID: 1,
 		User:         "user01",
 	}
@@ -174,7 +223,7 @@ func TestEncode(t *testing.T) {
 	}
 	//pp.Println(buf.Bytes())
 	buf.Reset()
-	packet = &SendPackets{}
+	packet = &ColferSendPackets{}
 	//packet.User = strings.Repeat("a", 1000000)
 	if err := w.Encode(packet); err != nil {
 		t.Error(err)
@@ -183,4 +232,16 @@ func TestEncode(t *testing.T) {
 	if firstByte != byte(1) {
 		t.Errorf("first byte is not 1. first byte:%v", firstByte)
 	}
+}
+
+func newSpBuffer(bs *buffers, org *ColferSendPackets) *spBuffer {
+	sp := bs.Get()
+	sp.Datetime = org.Datetime.Unix()
+	sp.User = org.User
+	sp.Db = org.Db
+	sp.Addr = org.Addr
+	sp.ConnectionID = org.ConnectionID
+	sp.State = org.State
+	sp.Packets = org.Packets
+	return sp
 }

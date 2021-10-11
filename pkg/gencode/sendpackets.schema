@@ -1,0 +1,12 @@
+
+struct SendPackets {
+	Datetime     int64
+	ConnectionID uint32 
+	User         string 
+	Db           string 
+	Addr         string 
+	State        string 
+	Err          string 
+	Packets      []byte 
+	Cmd          string 
+}

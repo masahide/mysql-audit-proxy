@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/masahide/mysql-audit-proxy/pkg/gencode"
 	"github.com/masahide/mysql-audit-proxy/pkg/parser"
 	"github.com/masahide/rcp/pkg/bytesize"
 	"github.com/siddontang/mixer/mysql"
@@ -41,6 +42,7 @@ type Config struct {
 	AllowIps        string `yaml:"allow_ips"`
 	ConfigPath      string
 	LogFileName     string
+	EncodeType      byte
 	LogGzip         bool
 	RotateTime      time.Duration
 	BufSize         string
@@ -56,6 +58,11 @@ type NodeConfig struct {
 	Addr     string `yaml:"addr"`
 }
 
+type spBuffer struct {
+	gencode.SendPackets
+	buf []byte
+}
+
 // Server  config
 type Server struct {
 	cfg  *Config
@@ -66,7 +73,7 @@ type Server struct {
 	//node     *NodeConfig
 	baseConnID uint32
 	bs         *buffers
-	queue      chan *SendPackets
+	queue      chan *spBuffer
 	al         *auditLogs
 	bufSize    int
 }
@@ -80,19 +87,19 @@ func newBuffers(size, n int) *buffers {
 	bs := buffers{}
 	bs.limit = make(chan struct{}, n)
 	bs.pool = sync.Pool{New: func() interface{} {
-		sp := SendPackets{buf: make([]byte, size)}
+		sp := spBuffer{buf: make([]byte, size)}
 		sp.Packets = sp.buf[:0]
 		return &sp
 	}}
 	return &bs
 }
 
-func (bs *buffers) Get() *SendPackets {
+func (bs *buffers) Get() *spBuffer {
 	bs.limit <- struct{}{} // 空くまで待つ
-	return bs.pool.Get().(*SendPackets)
+	return bs.pool.Get().(*spBuffer)
 }
 
-func (bs *buffers) Put(b *SendPackets) {
+func (bs *buffers) Put(b *spBuffer) {
 	bs.pool.Put(b)
 	<-bs.limit // 解放
 }
@@ -132,11 +139,12 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 	}
 	s.bufSize = int(bufsize)
 
-	s.queue = make(chan *SendPackets, s.cfg.QueueSize)
+	s.queue = make(chan *spBuffer, s.cfg.QueueSize)
 	s.bs = newBuffers(s.bufSize, s.cfg.QueueSize)
 	s.al = &auditLogs{
 		FileName:   s.cfg.LogFileName,
 		RotateTime: s.cfg.RotateTime,
+		EncodeType: s.cfg.EncodeType,
 		Queue:      s.queue,
 		Bs:         s.bs,
 		Gzip:       s.cfg.LogGzip,
@@ -273,7 +281,7 @@ type ClientConn struct {
 	node *NodeConfig
 
 	bs    *buffers
-	queue chan *SendPackets
+	queue chan *spBuffer
 }
 
 func (cc *ClientConn) close() error {
@@ -621,9 +629,9 @@ func (cc *ClientConn) sendState(ctx context.Context, state string) error {
 	return cc.postData(ctx, sp)
 }
 
-func (cc *ClientConn) getSendPackets() *SendPackets {
+func (cc *ClientConn) getSendPackets() *spBuffer {
 	sp := cc.bs.Get()
-	sp.Datetime = time.Now()
+	sp.Datetime = time.Now().Unix()
 	sp.User = cc.node.User
 	sp.Db = cc.node.Db
 	sp.Addr = cc.node.Addr
@@ -645,7 +653,7 @@ func putDebugData(data interface{}) {
 	}
 }
 
-func (cc *ClientConn) postData(ctx context.Context, sp *SendPackets) error {
+func (cc *ClientConn) postData(ctx context.Context, sp *spBuffer) error {
 	putDebugData(sp) // TODO: debug
 	select {
 	case <-ctx.Done():
@@ -656,17 +664,20 @@ func (cc *ClientConn) postData(ctx context.Context, sp *SendPackets) error {
 }
 
 func (cc *ClientConn) sendWorker(ctx context.Context, w net.Conn, r net.Conn) {
-	size := uint64(0)
-	var sp *SendPackets
+	var sp *spBuffer
 	for {
 		if sp == nil {
 			sp = cc.getSendPackets()
 			sp.Packets = sp.buf
 		}
-		n, err := cc.writeBufferAndSend(ctx, sp.Packets, w, r)
-		size += uint64(n)
-		if n > 0 {
-			sp.Packets = sp.Packets[:n]
+		var err error
+		sp.Packets, err = cc.writeBufferAndSend(ctx, sp.Packets, w, r)
+		if err != nil && err != io.EOF {
+			log.Printf("writeBufferAndSend err: %s", err)
+			return
+		}
+		if len(sp.Packets) > 0 {
+			sp.buf = sp.Packets
 			if err := cc.postData(ctx, sp); err != nil {
 				return
 			}
@@ -695,32 +706,59 @@ func (cc *ClientConn) netWrite(ctx context.Context, w net.Conn, buf []byte) (siz
 	}
 }
 
-func (cc *ClientConn) writeBufferAndSend(ctx context.Context, buf []byte, w, r net.Conn) (size int, err error) {
-	for {
-		if err = r.SetReadDeadline(time.Now().Add(cc.proxy.cfg.BufferFlushTime)); err != nil {
-			return
+func (cc *ClientConn) writeBufferAndSend(ctx context.Context, buf []byte, w, r net.Conn) ([]byte, error) {
+	/*
+		for {
+				if err = r.SetReadDeadline(time.Now().Add(cc.proxy.cfg.BufferFlushTime)); err != nil {
+					return
+				}
+				var n int
+				n, err = r.Read(buf)
+				size += n
+				if n > 0 {
+					if n, err := cc.netWrite(ctx, w, buf[:n]); err != nil {
+						return n, err
+					}
+				}
+				if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+					return
+				} else if err != nil && err == io.EOF {
+					return
+				}
+				buf = buf[n:]
+				if len(buf) == 0 {
+					return
+				}
 		}
-		var n int
-		n, err = r.Read(buf)
-		size += n
-		if n > 0 {
-			if n, err := cc.netWrite(ctx, w, buf[:n]); err != nil {
-				return n, err
-			}
-		}
-		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-			return
-		} else if err != nil && err == io.EOF {
-			return
-		}
-		buf = buf[n:]
-		if len(buf) == 0 {
-			return
-		}
-		//select {
-		//case <-ctx.Done():
-		//	return size, ctx.Err()
-		//default:
-		//}
+	*/
+
+	if len(buf) < 4 {
+		buf = append(buf, []byte{0, 0, 0, 0}...)
 	}
+	header := buf[:4] //[]byte{0, 0, 0, 0}
+	n, err := io.ReadFull(r, header)
+	if err != nil {
+		return nil, fmt.Errorf("packet ReadFull header err: %w n:%d", err, n)
+	}
+
+	length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
+	if length < 1 {
+		return nil, fmt.Errorf("invalid payload length %d", length)
+	}
+	if len(buf) < 4+length {
+		buf = append(buf, make([]byte, length+4-len(buf))...)
+	}
+	databuf := buf[4:length]
+	if n, err := io.ReadFull(r, databuf); err != nil {
+		return nil, fmt.Errorf("packet ReadFull data err: %w n:%d want:%d", err, n, len(databuf))
+	}
+	if n, err := cc.netWrite(ctx, w, buf[:length+4]); err != nil {
+		return nil, fmt.Errorf("netWrite err: %w n:%d", err, n)
+	}
+	return buf[:length+4], nil
+	//select {
+	//case <-ctx.Done():
+	//	return size, ctx.Err()
+	//default:
+	//}
 }

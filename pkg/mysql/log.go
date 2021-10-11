@@ -15,23 +15,27 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/masahide/mysql-audit-proxy/pkg/gencode"
 )
 
 const (
-	EncodeTypeColfer = 0x00
-	EncodeTypeRAW    = 0x01
-	EncodeTypeGOB    = 0xff
+	EncodeTypeColfer  = 0x00
+	EncodeTypeGOB     = 0x01
+	EncodeTypeGencode = 0x02
 
-	DefaultEncodeType = EncodeTypeGOB
+	DefaultEncodeType = EncodeTypeGencode
 )
 
-var decoderMap = map[byte]func(c *BinaryReader, s *SendPackets) error{
-	EncodeTypeGOB: gobReader,
+var decoderMap = map[byte]func(c *BinaryReader, s *gencode.SendPackets) error{
+	EncodeTypeGOB:     gobReader,
+	EncodeTypeGencode: gencodeReader,
 }
 
 var encoderMap = map[byte]func(c *BinaryWriter, s interface{}) error{
-	EncodeTypeColfer: colferEncode,
-	EncodeTypeGOB:    gobEncode,
+	EncodeTypeColfer:  colferEncode,
+	EncodeTypeGOB:     gobEncode,
+	EncodeTypeGencode: gencodeEncode,
 }
 
 // auditLogs audit log struct
@@ -42,21 +46,12 @@ type auditLogs struct {
 	EncodeType byte
 	MaxBufSize int
 	RotateTime time.Duration
-	Queue      chan *SendPackets
+	Queue      chan *spBuffer
 	Bs         *buffers
 
 	gz io.WriteCloser
 	f  *os.File
 }
-
-/*
-func truncate(t time.Time, d time.Duration) time.Time {
-	if d == 24*time.Hour {
-		return t.Truncate(time.Hour).Add(-time.Duration(t.Hour()) * time.Hour)
-	}
-	return t.Truncate(d)
-}
-*/
 
 // /path/to/mysql-audit.%Y%m%d%H.log
 func time2Path(p string, t time.Time) string {
@@ -127,7 +122,7 @@ func (a *auditLogs) logWorker(ctx context.Context, res chan error) {
 			e = a.newLogEncoder(w, a.EncodeType)
 		case <-ctx.Done():
 			for p := range a.Queue {
-				if err = e.Encode(p); err != nil {
+				if err = e.Encode(&p.SendPackets); err != nil {
 					return
 				}
 				a.Bs.Put(p)
@@ -138,7 +133,7 @@ func (a *auditLogs) logWorker(ctx context.Context, res chan error) {
 			if !ok {
 				return
 			}
-			if err = e.Encode(p); err != nil {
+			if err = e.Encode(&p.SendPackets); err != nil {
 				return
 			}
 			a.Bs.Put(p)
@@ -156,8 +151,8 @@ type LogDecoder struct {
 	EncodeType byte
 }
 
-func writeErr(enc *json.Encoder, sp *SendPackets, err error) error {
-	out := SendPackets{
+func writeErr(enc *json.Encoder, sp *gencode.SendPackets, err error) error {
+	out := gencode.SendPackets{
 		Datetime:     sp.Datetime,
 		ConnectionID: sp.ConnectionID,
 		User:         sp.User,
@@ -180,7 +175,7 @@ func (l *LogDecoder) Decode(out io.Writer, in io.Reader) error {
 	//dec := json.LogDecoder(in)
 	jsonEnc := json.NewEncoder(out)
 	for {
-		sp := &SendPackets{}
+		sp := &gencode.SendPackets{}
 		if err := dec.Decode(sp); err != nil {
 			if err == io.EOF {
 				break
@@ -213,8 +208,8 @@ func (l *LogDecoder) Decode(out io.Writer, in io.Reader) error {
 				*/
 				return err
 			}
-			out := SendPackets{
-				Datetime:     sp.Datetime,
+			out := ColferSendPackets{
+				Datetime:     time.Unix(sp.Datetime, 0),
 				ConnectionID: sp.ConnectionID,
 				User:         sp.User,
 				Db:           sp.Db,
@@ -275,14 +270,44 @@ func (c *BinaryWriter) Encode(s interface{}) error {
 	}
 	return fmt.Errorf("not support encodetype:%x", c.encodeType)
 }
+func gencodeEncode(c *BinaryWriter, s interface{}) error {
+	// header
+	if _, err := c.output.Write([]byte{0, EncodeTypeGencode}); err != nil {
+		return err
+	}
+	sp, ok := s.(*gencode.SendPackets)
+	if !ok {
+		switch v := s.(type) {
+		default:
+			return fmt.Errorf("not support data type:%T", v)
+		}
+	}
+	buf := c.dataBuf[:binary.MaxVarintLen64]
+	b, err := sp.Marshal(c.dataBuf[binary.MaxVarintLen64:])
+	if err != nil {
+		return err
+	}
+
+	size := uint64(len(b))
+	lenSize := binary.PutUvarint(buf, size)
+	if _, err := c.output.Write(buf[:lenSize]); err != nil {
+		return err
+	}
+	//log.Printf("data len:%d, buf len:%d, b len:%d", len(data), len(buf), len(b))
+	_, err = c.output.Write(b)
+	return err
+}
 func gobEncode(c *BinaryWriter, s interface{}) error {
 	// header
 	if _, err := c.output.Write([]byte{0, EncodeTypeGOB}); err != nil {
 		return err
 	}
-	sp, ok := s.(*SendPackets)
+	sp, ok := s.(*gencode.SendPackets)
 	if !ok {
-		return errors.New("not support data type")
+		switch v := s.(type) {
+		default:
+			return fmt.Errorf("not support data type:%T", v)
+		}
 	}
 	c.buf.Reset()
 	if err := gob.NewEncoder(c.buf).Encode(sp); err != nil {
@@ -297,9 +322,16 @@ func gobEncode(c *BinaryWriter, s interface{}) error {
 	return err
 }
 func colferEncode(c *BinaryWriter, s interface{}) error {
-	sp, ok := s.(*SendPackets)
+	sp, ok := s.(*ColferSendPackets)
 	if !ok {
-		return errors.New("not support data type")
+		tsp, ok := s.(*gencode.SendPackets)
+		if !ok {
+			switch v := s.(type) {
+			default:
+				return fmt.Errorf("not support data type:%T", v)
+			}
+		}
+		sp = getColferSp(tsp)
 	}
 	size := uint64(sp.MarshalTo(c.dataBuf))
 	lenSize := binary.PutUvarint(c.dataBuf[size:], size)
@@ -324,7 +356,38 @@ func newBinaryReader(r io.Reader) logDecoder {
 	return c
 }
 
-func gobReader(c *BinaryReader, s *SendPackets) error {
+func readAll(b []byte, r io.Reader) ([]byte, error) {
+	b = b[:0]
+	for {
+		if len(b) == cap(b) {
+			// Add more capacity (let append pick how much).
+			b = append(b, 0)[:len(b)]
+		}
+		n, err := r.Read(b[len(b):cap(b)])
+		b = b[:len(b)+n]
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			return b, err
+		}
+	}
+}
+
+func gencodeReader(c *BinaryReader, s *gencode.SendPackets) error {
+	size, err := binary.ReadUvarint(c.input)
+	if err != nil {
+		return err
+	}
+	_, err = io.ReadFull(c.input, c.dataBuf[:size])
+	if err != nil {
+		return err
+	}
+	_, err = s.Unmarshal(c.dataBuf[:size])
+	return err
+}
+
+func gobReader(c *BinaryReader, s *gencode.SendPackets) error {
 	size, err := binary.ReadUvarint(c.input)
 	if err != nil {
 		return err
@@ -337,7 +400,7 @@ func gobReader(c *BinaryReader, s *SendPackets) error {
 }
 
 func (c *BinaryReader) Decode(s interface{}) error {
-	sp, ok := s.(*SendPackets)
+	sp, ok := s.(*gencode.SendPackets)
 	if !ok {
 		return errors.New("not support data type")
 	}
@@ -359,25 +422,49 @@ func (c *BinaryReader) Decode(s interface{}) error {
 	if err != nil {
 		return fmt.Errorf("not support data type: err read head:%v", err)
 	}
-	// デコーダーマップからlogデコーダーを選択
 	if dec, ok := decoderMap[b]; ok {
 		return dec(c, sp)
 	}
 	return fmt.Errorf("not support logEncode type: %x", b)
 }
 
-func (c *BinaryReader) colferDecode(s *SendPackets) error {
+func (c *BinaryReader) colferDecode(s *gencode.SendPackets) error {
 	size, err := binary.ReadUvarint(c.input)
 	if err != nil {
 		return err
 	}
-	if len(c.dataBuf) < int(size) {
-		return fmt.Errorf("The buffer size has been exceeded. size:%d  > len(dataBuf)=%d", size, len(c.dataBuf))
-	}
-	_, err = c.input.Read(c.dataBuf[:size])
+	_, err = io.ReadFull(c.input, c.dataBuf[:size])
 	if err != nil {
 		return err
 	}
-	_, err = s.Unmarshal(c.dataBuf[:size])
+	csp := &ColferSendPackets{}
+	_, err = csp.Unmarshal(c.dataBuf[:size])
+	cpSp(s, csp)
 	return err
+}
+
+func getColferSp(sp *gencode.SendPackets) *ColferSendPackets {
+	return &ColferSendPackets{
+		Datetime:     time.Unix(sp.Datetime, 0),
+		ConnectionID: sp.ConnectionID,
+		User:         sp.User,
+		Db:           sp.Db,
+		Addr:         sp.Addr,
+		State:        sp.State,
+		Err:          sp.Err,
+		Packets:      sp.Packets,
+		Cmd:          sp.Cmd,
+	}
+}
+
+func cpSp(to *gencode.SendPackets, csp *ColferSendPackets) {
+	to.Datetime = csp.Datetime.Unix()
+	to.ConnectionID = csp.ConnectionID
+	to.User = csp.User
+	to.Db = csp.Db
+	to.Addr = csp.Addr
+	to.State = csp.State
+	to.Err = csp.Err
+	to.Packets = csp.Packets
+	to.Cmd = csp.Cmd
 }

@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 
@@ -58,8 +59,11 @@ func (c *conbuf) dispatch(data []byte) string {
 func (c *conbuf) readPacket() ([]byte, error) {
 	header := []byte{0, 0, 0, 0}
 
-	if _, err := io.ReadFull(c.in, header); err != nil {
-		return nil, err
+	if i, err := io.ReadFull(c.in, header); err != nil {
+		if i == 0 && (errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF)) {
+			return nil, io.EOF
+		}
+		return nil, fmt.Errorf("readPacket header read_bytes:%d err: %w", i, err)
 	}
 	c.readSize += int64(len(header))
 
@@ -79,14 +83,15 @@ func (c *conbuf) readPacket() ([]byte, error) {
 	*/
 
 	data := make([]byte, length)
-	if _, err := io.ReadFull(c.in, data); err != nil {
-		return nil, err
+	if i, err := io.ReadFull(c.in, data); err != nil {
+		return nil, fmt.Errorf("readPacket data len(data)=%d read_bytes:%d err: %w", len(data), i, err)
 	}
 	c.readSize += int64(length)
 
 	if length < maxPayloadLen {
 		return data, nil
 	}
+	//log.Printf("length:%d < maxPayloadLen:%d", length, maxPayloadLen)
 
 	buf, err := c.readPacket()
 	if err != nil {
