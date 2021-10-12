@@ -26,6 +26,9 @@ const (
 	EncodeTypeGencode = 0x02
 
 	DefaultEncodeType = EncodeTypeGencode
+
+	defaultReadBufSize  = 1024
+	defaultWriteBufSize = 1024
 )
 
 var decoderMap = map[byte]func(c *BinaryReader, s *gencode.SendPackets) error{
@@ -45,7 +48,6 @@ type auditLogs struct {
 	Gzip       bool
 	JSON       bool
 	EncodeType byte
-	MaxBufSize int
 	RotateTime time.Duration
 	Queue      chan *gencode.SendPackets
 	Bs         *buffers
@@ -249,8 +251,7 @@ func (a *auditLogs) newLogEncoder(w io.Writer, t byte) logEncoder {
 func (a *auditLogs) newBinaryWriter(w io.Writer, t byte) logEncoder {
 	c := &BinaryWriter{
 		output:     w,
-		dataBuf:    make([]byte, a.MaxBufSize),
-		buf:        &bytes.Buffer{},
+		buf:        bytes.NewBuffer(make([]byte, defaultWriteBufSize)),
 		encodeType: t,
 	}
 	return c
@@ -259,7 +260,6 @@ func (a *auditLogs) newBinaryWriter(w io.Writer, t byte) logEncoder {
 type BinaryWriter struct {
 	output     io.Writer
 	buf        *bytes.Buffer
-	dataBuf    []byte
 	encodeType byte
 }
 
@@ -271,6 +271,7 @@ func (c *BinaryWriter) Encode(s interface{}) error {
 	return fmt.Errorf("not support encodetype:%x", c.encodeType)
 }
 func gencodeEncode(c *BinaryWriter, s interface{}) error {
+	lengthBuf := make([]byte, binary.MaxVarintLen64)
 	// header
 	if _, err := c.output.Write([]byte{0, EncodeTypeGencode}); err != nil {
 		return err
@@ -282,15 +283,20 @@ func gencodeEncode(c *BinaryWriter, s interface{}) error {
 			return fmt.Errorf("not support data type:%T", v)
 		}
 	}
-	buf := c.dataBuf[:binary.MaxVarintLen64]
-	b, err := sp.Marshal(c.dataBuf[binary.MaxVarintLen64:])
+	spSize := int(sp.Size())
+	c.buf.Reset()
+	if c.buf.Cap() < spSize {
+		c.buf.Grow(spSize)
+	}
+	buf := c.buf.Bytes()[:spSize]
+	b, err := sp.Marshal(buf)
 	if err != nil {
 		return err
 	}
 
 	size := uint64(len(b))
-	lenSize := binary.PutUvarint(buf, size)
-	if _, err := c.output.Write(buf[:lenSize]); err != nil {
+	lenSize := binary.PutUvarint(lengthBuf, size)
+	if _, err := c.output.Write(lengthBuf[:lenSize]); err != nil {
 		return err
 	}
 	//log.Printf("data len:%d, buf len:%d, b len:%d", len(data), len(buf), len(b))
@@ -298,6 +304,7 @@ func gencodeEncode(c *BinaryWriter, s interface{}) error {
 	return err
 }
 func gobEncode(c *BinaryWriter, s interface{}) error {
+	lengthBuf := make([]byte, binary.MaxVarintLen64)
 	// header
 	if _, err := c.output.Write([]byte{0, EncodeTypeGOB}); err != nil {
 		return err
@@ -314,14 +321,16 @@ func gobEncode(c *BinaryWriter, s interface{}) error {
 		return err
 	}
 	size := uint64(c.buf.Len())
-	lenSize := binary.PutUvarint(c.dataBuf, size)
-	if _, err := c.output.Write(c.dataBuf[:lenSize]); err != nil {
+	lenSize := binary.PutUvarint(lengthBuf, size)
+	if _, err := c.output.Write(lengthBuf[:lenSize]); err != nil {
 		return err
 	}
 	_, err := io.Copy(c.output, c.buf)
 	return err
 }
 func colferEncode(c *BinaryWriter, s interface{}) error {
+	lengthBuf := make([]byte, binary.MaxVarintLen64)
+	// header
 	sp, ok := s.(*colfer.ColferSendPackets)
 	if !ok {
 		tsp, ok := s.(*gencode.SendPackets)
@@ -333,25 +342,31 @@ func colferEncode(c *BinaryWriter, s interface{}) error {
 		}
 		sp = getColferSp(tsp)
 	}
-	size := uint64(sp.MarshalTo(c.dataBuf))
-	lenSize := binary.PutUvarint(c.dataBuf[size:], size)
-	_, err := c.output.Write(c.dataBuf[size : int(size)+lenSize])
+	c.buf.Reset()
+	if c.buf.Cap() < colfer.ColferSizeMax {
+		c.buf.Grow(colfer.ColferSizeMax)
+	}
+	buf := c.buf.Bytes()[:colfer.ColferSizeMax]
+	//log.Printf("buf size:%d,cap:%d ColferSizeMax:%d", len(buf), cap(buf), colfer.ColferSizeMax)
+	size := sp.MarshalTo(buf)
+	lenSize := binary.PutUvarint(lengthBuf, uint64(size))
+	_, err := c.output.Write(lengthBuf[:lenSize])
 	if err != nil {
 		return err
 	}
-	_, err = c.output.Write(c.dataBuf[:size])
+	_, err = c.output.Write(buf[:size])
 	return err
 }
 
 type BinaryReader struct {
 	input   *bufio.Reader
-	dataBuf []byte
+	readBuf *bytes.Buffer
 }
 
 func (a *auditLogs) newBinaryReader(r io.Reader) logDecoder {
 	c := &BinaryReader{
 		input:   bufio.NewReader(r),
-		dataBuf: make([]byte, a.MaxBufSize),
+		readBuf: bytes.NewBuffer(make([]byte, defaultReadBufSize)),
 	}
 	return c
 }
@@ -361,15 +376,16 @@ func gencodeReader(c *BinaryReader, s *gencode.SendPackets) error {
 	if err != nil {
 		return err
 	}
-	if uint64(len(c.dataBuf)) < size {
-		//log.Printf("gencodeReaeder len(dataBuf):%d, size:%d", len(c.dataBuf), size)
-		c.dataBuf = append(c.dataBuf, make([]byte, int(size)-len(c.dataBuf))...)
+	c.readBuf.Reset()
+	if uint64(c.readBuf.Cap()) < size {
+		c.readBuf.Grow(int(size))
 	}
-	_, err = io.ReadFull(c.input, c.dataBuf[:size])
+	readBuf := c.readBuf.Bytes()[:size]
+	_, err = io.ReadFull(c.input, readBuf)
 	if err != nil {
 		return err
 	}
-	_, err = s.Unmarshal(c.dataBuf[:size])
+	_, err = s.Unmarshal(readBuf)
 	return err
 }
 
@@ -397,7 +413,7 @@ func (c *BinaryReader) Decode(s interface{}) error {
 	if err != nil {
 		return fmt.Errorf("not support data type: err read head:%v", err)
 	}
-	if b != 0 { // 0i以外はcolfer
+	if b != 0 { // 0以外はcolfer
 		c.input.UnreadByte()
 		return c.colferDecode(sp)
 	}
@@ -419,16 +435,17 @@ func (c *BinaryReader) colferDecode(s *gencode.SendPackets) error {
 	if err != nil {
 		return err
 	}
-	if uint64(len(c.dataBuf)) < size {
-		//log.Printf("colferReader len(dataBuf):%d, size:%d", len(c.dataBuf), size)
-		c.dataBuf = append(c.dataBuf, make([]byte, int(size)-len(c.dataBuf))...)
+	c.readBuf.Reset()
+	if uint64(c.readBuf.Cap()) < size {
+		c.readBuf.Grow(int(size))
 	}
-	_, err = io.ReadFull(c.input, c.dataBuf[:size])
+	readBuf := c.readBuf.Bytes()[:size]
+	_, err = io.ReadFull(c.input, readBuf)
 	if err != nil {
 		return err
 	}
 	csp := &colfer.ColferSendPackets{}
-	_, err = csp.Unmarshal(c.dataBuf[:size])
+	_, err = csp.Unmarshal(readBuf)
 	cpSp(s, csp)
 	return err
 }

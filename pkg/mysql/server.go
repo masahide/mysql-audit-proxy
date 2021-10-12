@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -143,7 +143,6 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 		Queue:      s.queue,
 		Bs:         s.bs,
 		Gzip:       s.cfg.LogGzip,
-		MaxBufSize: s.bufSize,
 	}
 	return s, nil
 }
@@ -597,15 +596,19 @@ func (cc *ClientConn) run(ctx context.Context) {
 	// nolint: errcheck
 	cc.sendState(ctx, "connect")
 	wg := sync.WaitGroup{}
+	cctx, cancel := context.WithCancel(ctx)
 	wg.Add(2)
 	go func() {
-		// nolint:errcheck
-		io.Copy(cc.c, pc.conn)
+		_, err := io.Copy(cc.c, pc.conn)
+		if err != nil {
+			log.Printf("copy cc.c pc.conn err:%s", err)
+		}
+		cancel()
 		wg.Done()
 	}()
 	go func() {
-		//io.Copy(pc.conn, cc.c)
-		cc.sendWorker(ctx, pc.conn, cc.c)
+		cc.sendWorker(cctx, pc.conn, cc.c)
+		cancel()
 		wg.Done()
 	}()
 	wg.Wait()
@@ -635,6 +638,7 @@ func (cc *ClientConn) getSendPackets() *gencode.SendPackets {
 	return sp
 }
 
+/*
 func putDebugData(data interface{}) {
 	file, err := os.OpenFile("tmplog.json", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0666)
 	if err != nil {
@@ -647,19 +651,26 @@ func putDebugData(data interface{}) {
 		log.Fatal(err)
 	}
 }
+*/
 
 func (cc *ClientConn) postData(ctx context.Context, sp *gencode.SendPackets) error {
-	putDebugData(sp) // TODO: debug
+	//putDebugData(sp) // TODO: debug
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case cc.queue <- sp:
+		sp = nil
 	}
 	return nil
 }
 
 func (cc *ClientConn) sendWorker(ctx context.Context, w net.Conn, r net.Conn) {
 	var sp *gencode.SendPackets
+	defer func() {
+		if sp != nil {
+			cc.bs.Put(sp)
+		}
+	}()
 	for {
 		if sp == nil {
 			sp = cc.getSendPackets()
@@ -681,52 +692,66 @@ func (cc *ClientConn) sendWorker(ctx context.Context, w net.Conn, r net.Conn) {
 		}
 	}
 }
-func (cc *ClientConn) netWrite(ctx context.Context, w net.Conn, buf []byte) (size int, err error) {
-	for {
-		var n int
-		if n, err = w.Write(buf); err != nil {
-			return n, err
-		}
-		size += n
-		if buf = buf[n:]; len(buf) == 0 {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return size, ctx.Err()
-		default:
-		}
-	}
-}
 
-func (cc *ClientConn) writeBufferAndSend(ctx context.Context, buf []byte, w, r net.Conn) ([]byte, error) {
-	if len(buf) < 4 {
-		buf = append(buf, []byte{0, 0, 0, 0}...)
+func (cc *ClientConn) writeBufferAndSend(ctx context.Context, writeBuf []byte, w, r net.Conn) ([]byte, error) {
+	if cap(writeBuf) < 4 {
+		log.Printf("cap:%d", cap(writeBuf))
+		writeBuf = make([]byte, cc.proxy.bufSize)
 	}
-	header := buf[:4] //[]byte{0, 0, 0, 0}
-	n, err := io.ReadFull(r, header)
+	header := writeBuf[:4] //[]byte{0, 0, 0, 0}
+	n, err := cc.readFull(ctx, r, header)
 	if err != nil {
-		return nil, fmt.Errorf("packet ReadFull header err: %w n:%d", err, n)
+		return writeBuf, fmt.Errorf("packet ReadFull header err: %w n:%d", err, n)
 	}
 
 	length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
 	if length < 1 {
-		return nil, fmt.Errorf("invalid payload length %d", length)
+		return writeBuf, fmt.Errorf("invalid payload length %d", length)
 	}
-	if len(buf) < 4+length {
-		buf = append(buf, make([]byte, length+4-len(buf))...)
+	//log.Printf("header:%v length:%d len(writeBuf):%d, cap(writeBuf):%d,writeBuf[:4]:%v", header, length, len(writeBuf), cap(writeBuf), writeBuf[:4])
+	if cap(writeBuf) < 4+length {
+		writeBuf = writeBuf[:cap(writeBuf)]
+		writeBuf = append(writeBuf, make([]byte, length+4-cap(writeBuf))...)
 	}
-	databuf := buf[4 : length+4]
-	if n, err := io.ReadFull(r, databuf); err != nil {
-		return nil, fmt.Errorf("packet ReadFull data err: %w n:%d want:%d", err, n, len(databuf))
+	//log.Printf("header:%v length:%d len(writeBuf):%d, cap(writeBuf):%d,writeBuf[:4]:%v", header, length, len(writeBuf), cap(writeBuf), writeBuf[:4])
+	databuf := writeBuf[4 : length+4]
+	if n, err := cc.readFull(ctx, r, databuf); err != nil {
+		return writeBuf, fmt.Errorf("packet ReadFull data err: %w n:%d want:%d", err, n, len(databuf))
 	}
-	if n, err := cc.netWrite(ctx, w, buf[:length+4]); err != nil {
-		return nil, fmt.Errorf("netWrite err: %w n:%d", err, n)
+	if n, err := w.Write(writeBuf[:length+4]); err != nil {
+		return writeBuf, fmt.Errorf("netWrite err: %w n:%d", err, n)
 	}
-	return buf[:length+4], nil
-	//select {
-	//case <-ctx.Done():
-	//	return size, ctx.Err()
-	//default:
-	//}
+	return writeBuf[:length+4], nil
+}
+
+func (cc *ClientConn) readFull(ctx context.Context, r net.Conn, buf []byte) (int, error) {
+	size := 0
+	for {
+		if err := r.SetReadDeadline(time.Now().Add(cc.proxy.cfg.BufferFlushTime)); err != nil {
+			return 0, err
+		}
+		nn, err := r.Read(buf)
+		size += nn
+		switch {
+		case err == nil:
+		case os.IsTimeout(err):
+			select {
+			case <-ctx.Done():
+				return size, nil
+			default:
+			}
+		case errors.Is(err, io.EOF):
+			if size == 0 {
+				return 0, nil
+			}
+			return size, io.ErrUnexpectedEOF
+		case err != nil:
+			log.Printf("read err:%s", err)
+			return size, err
+		}
+		buf = buf[nn:]
+		if len(buf) == 0 {
+			return size, nil
+		}
+	}
 }

@@ -91,7 +91,6 @@ func testLogWorker(t *testing.T, encType byte, testDataFile string, result bool)
 		EncodeType: encType,
 		Bs:         bs,
 		Gzip:       true,
-		MaxBufSize: bufSize,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	logErrCh := make(chan error, 1)
@@ -131,7 +130,7 @@ func cmpStructs(filename, testDataFile string, t *testing.T) string {
 
 	in, _ := os.Open(filename)
 	gzr, _ := gzip.NewReader(in)
-	a := &auditLogs{JSON: false, MaxBufSize: 32 * 1024 * 1024}
+	a := &auditLogs{JSON: false}
 	logdec := a.newLogDecoder(gzr)
 	dataf, _ := os.Open(testDataFile)
 	defer dataf.Close()
@@ -213,7 +212,7 @@ func TestEncode(t *testing.T) {
 	//b := []byte{}
 
 	buf := &bytes.Buffer{}
-	a := &auditLogs{MaxBufSize: 32 * 1024 * 1024}
+	a := &auditLogs{}
 	w := a.newBinaryWriter(buf, EncodeTypeColfer)
 	packet := &colfer.ColferSendPackets{
 		ConnectionID: 1,
