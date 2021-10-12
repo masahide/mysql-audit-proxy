@@ -40,6 +40,7 @@ var (
 		RotateTime:      1 * time.Hour,
 		QueueSize:       200,
 		BufSize:         "32mb",
+		EncodeType:      mysql.EncodeTypeGencode,
 		BufferFlushTime: 1 * time.Second,
 	}
 )

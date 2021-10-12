@@ -2,7 +2,7 @@ package mysql
 
 import (
 	"bytes"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -18,82 +18,6 @@ type conbuf struct {
 	in       *bytes.Buffer
 	readSize int64
 	sequence uint8
-}
-
-// LogDecoder struct
-type LogDecoder struct {
-	JSON bool
-}
-
-func writeErr(enc *json.Encoder, sp *SendPackets, err error) error {
-	out := SendPackets{
-		Datetime:     sp.Datetime,
-		ConnectionID: sp.ConnectionID,
-		User:         sp.User,
-		Db:           sp.Db,
-		Addr:         sp.Addr,
-		State:        sp.State,
-		Packets:      sp.Packets,
-		Err:          err.Error(),
-	}
-	return enc.Encode(out)
-}
-
-// Decode stream
-func (l *LogDecoder) Decode(out io.Writer, in io.Reader) error {
-	a := &auditLogs{
-		JSON: l.JSON,
-	}
-	dec := a.newDecoder(in)
-	//dec := json.NewDecoder(in)
-	enc := json.NewEncoder(out)
-	for {
-		sp := &SendPackets{}
-		if err := dec.Decode(sp); err != nil {
-			if err == io.EOF {
-				break
-			}
-			if err := writeErr(enc, sp, err); err != nil {
-				return err
-			}
-		}
-		if sp.State != "est" {
-			if err := enc.Encode(sp); err != nil {
-				return err
-			}
-		}
-		cb := &conbuf{
-			in: bytes.NewBuffer(sp.Packets),
-		}
-		for {
-			data, err := cb.readPacket()
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				if err := writeErr(enc, sp, err); err != nil {
-					return err
-				}
-			}
-			out := SendPackets{
-				Datetime:     sp.Datetime,
-				ConnectionID: sp.ConnectionID,
-				User:         sp.User,
-				Db:           sp.Db,
-				Addr:         sp.Addr,
-				State:        sp.State,
-				Cmd:          cb.dispatch(data),
-			}
-			err = enc.Encode(out)
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 func (c *conbuf) dispatch(data []byte) string {
@@ -135,8 +59,11 @@ func (c *conbuf) dispatch(data []byte) string {
 func (c *conbuf) readPacket() ([]byte, error) {
 	header := []byte{0, 0, 0, 0}
 
-	if _, err := io.ReadFull(c.in, header); err != nil {
-		return nil, err
+	if i, err := io.ReadFull(c.in, header); err != nil {
+		if i == 0 && (errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF)) {
+			return nil, io.EOF
+		}
+		return nil, fmt.Errorf("readPacket header read_bytes:%d err: %w", i, err)
 	}
 	c.readSize += int64(len(header))
 
@@ -156,14 +83,15 @@ func (c *conbuf) readPacket() ([]byte, error) {
 	*/
 
 	data := make([]byte, length)
-	if _, err := io.ReadFull(c.in, data); err != nil {
-		return nil, err
+	if i, err := io.ReadFull(c.in, data); err != nil {
+		return nil, fmt.Errorf("readPacket data len(data)=%d read_bytes:%d err: %w", len(data), i, err)
 	}
 	c.readSize += int64(length)
 
 	if length < maxPayloadLen {
 		return data, nil
 	}
+	//log.Printf("length:%d < maxPayloadLen:%d", length, maxPayloadLen)
 
 	buf, err := c.readPacket()
 	if err != nil {

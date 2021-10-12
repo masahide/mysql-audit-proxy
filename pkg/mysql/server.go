@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/masahide/mysql-audit-proxy/pkg/gencode"
 	"github.com/masahide/mysql-audit-proxy/pkg/parser"
 	"github.com/masahide/rcp/pkg/bytesize"
 	"github.com/siddontang/mixer/mysql"
@@ -40,6 +42,7 @@ type Config struct {
 	AllowIps        string `yaml:"allow_ips"`
 	ConfigPath      string
 	LogFileName     string
+	EncodeType      byte
 	LogGzip         bool
 	RotateTime      time.Duration
 	BufSize         string
@@ -65,7 +68,7 @@ type Server struct {
 	//node     *NodeConfig
 	baseConnID uint32
 	bs         *buffers
-	queue      chan *SendPackets
+	queue      chan *gencode.SendPackets
 	al         *auditLogs
 	bufSize    int
 }
@@ -79,19 +82,19 @@ func newBuffers(size, n int) *buffers {
 	bs := buffers{}
 	bs.limit = make(chan struct{}, n)
 	bs.pool = sync.Pool{New: func() interface{} {
-		sp := SendPackets{buf: make([]byte, size)}
-		sp.Packets = sp.buf[:0]
+		sp := gencode.SendPackets{}
+		sp.Packets = make([]byte, size)
 		return &sp
 	}}
 	return &bs
 }
 
-func (bs *buffers) Get() *SendPackets {
+func (bs *buffers) Get() *gencode.SendPackets {
 	bs.limit <- struct{}{} // 空くまで待つ
-	return bs.pool.Get().(*SendPackets)
+	return bs.pool.Get().(*gencode.SendPackets)
 }
 
-func (bs *buffers) Put(b *SendPackets) {
+func (bs *buffers) Put(b *gencode.SendPackets) {
 	bs.pool.Put(b)
 	<-bs.limit // 解放
 }
@@ -131,15 +134,15 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 	}
 	s.bufSize = int(bufsize)
 
-	s.queue = make(chan *SendPackets, s.cfg.QueueSize)
+	s.queue = make(chan *gencode.SendPackets, s.cfg.QueueSize)
 	s.bs = newBuffers(s.bufSize, s.cfg.QueueSize)
 	s.al = &auditLogs{
 		FileName:   s.cfg.LogFileName,
 		RotateTime: s.cfg.RotateTime,
+		EncodeType: s.cfg.EncodeType,
 		Queue:      s.queue,
 		Bs:         s.bs,
 		Gzip:       s.cfg.LogGzip,
-		MaxBufSize: s.bufSize,
 	}
 	return s, nil
 }
@@ -272,7 +275,7 @@ type ClientConn struct {
 	node *NodeConfig
 
 	bs    *buffers
-	queue chan *SendPackets
+	queue chan *gencode.SendPackets
 }
 
 func (cc *ClientConn) close() error {
@@ -593,15 +596,19 @@ func (cc *ClientConn) run(ctx context.Context) {
 	// nolint: errcheck
 	cc.sendState(ctx, "connect")
 	wg := sync.WaitGroup{}
+	cctx, cancel := context.WithCancel(ctx)
 	wg.Add(2)
 	go func() {
-		// nolint:errcheck
-		io.Copy(cc.c, pc.conn)
+		_, err := io.Copy(cc.c, pc.conn)
+		if err != nil {
+			log.Printf("copy cc.c pc.conn err:%s", err)
+		}
+		cancel()
 		wg.Done()
 	}()
 	go func() {
-		//io.Copy(pc.conn, cc.c)
-		cc.sendWorker(ctx, pc.conn, cc.c)
+		cc.sendWorker(cctx, pc.conn, cc.c)
+		cancel()
 		wg.Done()
 	}()
 	wg.Wait()
@@ -620,9 +627,9 @@ func (cc *ClientConn) sendState(ctx context.Context, state string) error {
 	return cc.postData(ctx, sp)
 }
 
-func (cc *ClientConn) getSendPackets() *SendPackets {
+func (cc *ClientConn) getSendPackets() *gencode.SendPackets {
 	sp := cc.bs.Get()
-	sp.Datetime = time.Now()
+	sp.Datetime = time.Now().Unix()
 	sp.User = cc.node.User
 	sp.Db = cc.node.Db
 	sp.Addr = cc.node.Addr
@@ -631,27 +638,50 @@ func (cc *ClientConn) getSendPackets() *SendPackets {
 	return sp
 }
 
-func (cc *ClientConn) postData(ctx context.Context, sp *SendPackets) error {
+/*
+func putDebugData(data interface{}) {
+	file, err := os.OpenFile("tmplog.json", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0666)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+	enc := json.NewEncoder(file)
+	err = enc.Encode(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+*/
+
+func (cc *ClientConn) postData(ctx context.Context, sp *gencode.SendPackets) error {
+	//putDebugData(sp) // TODO: debug
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case cc.queue <- sp:
+		sp = nil
 	}
 	return nil
 }
 
 func (cc *ClientConn) sendWorker(ctx context.Context, w net.Conn, r net.Conn) {
-	size := uint64(0)
-	var sp *SendPackets
+	var sp *gencode.SendPackets
+	defer func() {
+		if sp != nil {
+			cc.bs.Put(sp)
+		}
+	}()
 	for {
 		if sp == nil {
 			sp = cc.getSendPackets()
-			sp.Packets = sp.buf
 		}
-		n, err := cc.writeBufferAndSend(ctx, sp.Packets, w, r)
-		size += uint64(n)
-		if n > 0 {
-			sp.Packets = sp.Packets[:n]
+		var err error
+		sp.Packets, err = cc.writeBufferAndSend(ctx, sp.Packets, w, r)
+		if err != nil && err != io.EOF {
+			log.Printf("writeBufferAndSend err: %s", err)
+			return
+		}
+		if len(sp.Packets) > 0 {
 			if err := cc.postData(ctx, sp); err != nil {
 				return
 			}
@@ -662,50 +692,69 @@ func (cc *ClientConn) sendWorker(ctx context.Context, w net.Conn, r net.Conn) {
 		}
 	}
 }
-func (cc *ClientConn) netWrite(ctx context.Context, w net.Conn, buf []byte) (size int, err error) {
-	for {
-		var n int
-		if n, err = w.Write(buf); err != nil {
-			return n, err
-		}
-		size += n
-		if buf = buf[n:]; len(buf) == 0 {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return size, ctx.Err()
-		default:
-		}
+
+func (cc *ClientConn) writeBufferAndSend(ctx context.Context, writeBuf []byte, w, r net.Conn) ([]byte, error) {
+	if cap(writeBuf) < 4 {
+		log.Printf("cap:%d", cap(writeBuf))
+		writeBuf = make([]byte, cc.proxy.bufSize)
 	}
+	header := writeBuf[:4] //[]byte{0, 0, 0, 0}
+	n, err := cc.readFull(ctx, r, header)
+	if err != nil {
+		if n == 0 && err == io.EOF {
+			return writeBuf, err
+		}
+		return writeBuf, fmt.Errorf("packet ReadFull header err: %w n:%d", err, n)
+	}
+
+	length := int(uint32(header[0]) | uint32(header[1])<<8 | uint32(header[2])<<16)
+	if length < 1 {
+		return writeBuf, fmt.Errorf("invalid payload length %d", length)
+	}
+	//log.Printf("header:%v length:%d len(writeBuf):%d, cap(writeBuf):%d,writeBuf[:4]:%v", header, length, len(writeBuf), cap(writeBuf), writeBuf[:4])
+	if cap(writeBuf) < 4+length {
+		writeBuf = writeBuf[:cap(writeBuf)]
+		writeBuf = append(writeBuf, make([]byte, length+4-cap(writeBuf))...)
+	}
+	//log.Printf("header:%v length:%d len(writeBuf):%d, cap(writeBuf):%d,writeBuf[:4]:%v", header, length, len(writeBuf), cap(writeBuf), writeBuf[:4])
+	databuf := writeBuf[4 : length+4]
+	if n, err := cc.readFull(ctx, r, databuf); err != nil {
+		return writeBuf, fmt.Errorf("packet ReadFull data err: %w n:%d want:%d", err, n, len(databuf))
+	}
+	if n, err := w.Write(writeBuf[:length+4]); err != nil {
+		return writeBuf, fmt.Errorf("netWrite err: %w n:%d", err, n)
+	}
+	return writeBuf[:length+4], nil
 }
 
-func (cc *ClientConn) writeBufferAndSend(ctx context.Context, buf []byte, w, r net.Conn) (size int, err error) {
+func (cc *ClientConn) readFull(ctx context.Context, r net.Conn, buf []byte) (int, error) {
+	size := 0
 	for {
-		if err = r.SetReadDeadline(time.Now().Add(cc.proxy.cfg.BufferFlushTime)); err != nil {
-			return
+		if err := r.SetReadDeadline(time.Now().Add(cc.proxy.cfg.BufferFlushTime)); err != nil {
+			return 0, err
 		}
-		var n int
-		n, err = r.Read(buf)
-		size += n
-		if n > 0 {
-			if n, err := cc.netWrite(ctx, w, buf[:n]); err != nil {
-				return n, err
+		nn, err := r.Read(buf)
+		size += nn
+		switch {
+		case err == nil:
+		case os.IsTimeout(err):
+			select {
+			case <-ctx.Done():
+				return size, nil
+			default:
 			}
+		case errors.Is(err, io.EOF):
+			if size == 0 {
+				return size, err
+			}
+			return size, io.ErrUnexpectedEOF
+		case err != nil:
+			log.Printf("read err:%s", err)
+			return size, err
 		}
-		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-			return
-		} else if err != nil && err == io.EOF {
-			return
-		}
-		buf = buf[n:]
+		buf = buf[nn:]
 		if len(buf) == 0 {
-			return
+			return size, nil
 		}
-		//select {
-		//case <-ctx.Done():
-		//	return size, ctx.Err()
-		//default:
-		//}
 	}
 }
