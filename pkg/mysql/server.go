@@ -58,11 +58,6 @@ type NodeConfig struct {
 	Addr     string `yaml:"addr"`
 }
 
-type spBuffer struct {
-	gencode.SendPackets
-	buf []byte
-}
-
 // Server  config
 type Server struct {
 	cfg  *Config
@@ -73,7 +68,7 @@ type Server struct {
 	//node     *NodeConfig
 	baseConnID uint32
 	bs         *buffers
-	queue      chan *spBuffer
+	queue      chan *gencode.SendPackets
 	al         *auditLogs
 	bufSize    int
 }
@@ -87,19 +82,19 @@ func newBuffers(size, n int) *buffers {
 	bs := buffers{}
 	bs.limit = make(chan struct{}, n)
 	bs.pool = sync.Pool{New: func() interface{} {
-		sp := spBuffer{buf: make([]byte, size)}
-		sp.Packets = sp.buf[:0]
+		sp := gencode.SendPackets{}
+		sp.Packets = make([]byte, size)
 		return &sp
 	}}
 	return &bs
 }
 
-func (bs *buffers) Get() *spBuffer {
+func (bs *buffers) Get() *gencode.SendPackets {
 	bs.limit <- struct{}{} // 空くまで待つ
-	return bs.pool.Get().(*spBuffer)
+	return bs.pool.Get().(*gencode.SendPackets)
 }
 
-func (bs *buffers) Put(b *spBuffer) {
+func (bs *buffers) Put(b *gencode.SendPackets) {
 	bs.pool.Put(b)
 	<-bs.limit // 解放
 }
@@ -139,7 +134,7 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 	}
 	s.bufSize = int(bufsize)
 
-	s.queue = make(chan *spBuffer, s.cfg.QueueSize)
+	s.queue = make(chan *gencode.SendPackets, s.cfg.QueueSize)
 	s.bs = newBuffers(s.bufSize, s.cfg.QueueSize)
 	s.al = &auditLogs{
 		FileName:   s.cfg.LogFileName,
@@ -281,7 +276,7 @@ type ClientConn struct {
 	node *NodeConfig
 
 	bs    *buffers
-	queue chan *spBuffer
+	queue chan *gencode.SendPackets
 }
 
 func (cc *ClientConn) close() error {
@@ -629,7 +624,7 @@ func (cc *ClientConn) sendState(ctx context.Context, state string) error {
 	return cc.postData(ctx, sp)
 }
 
-func (cc *ClientConn) getSendPackets() *spBuffer {
+func (cc *ClientConn) getSendPackets() *gencode.SendPackets {
 	sp := cc.bs.Get()
 	sp.Datetime = time.Now().Unix()
 	sp.User = cc.node.User
@@ -653,7 +648,7 @@ func putDebugData(data interface{}) {
 	}
 }
 
-func (cc *ClientConn) postData(ctx context.Context, sp *spBuffer) error {
+func (cc *ClientConn) postData(ctx context.Context, sp *gencode.SendPackets) error {
 	putDebugData(sp) // TODO: debug
 	select {
 	case <-ctx.Done():
@@ -664,11 +659,10 @@ func (cc *ClientConn) postData(ctx context.Context, sp *spBuffer) error {
 }
 
 func (cc *ClientConn) sendWorker(ctx context.Context, w net.Conn, r net.Conn) {
-	var sp *spBuffer
+	var sp *gencode.SendPackets
 	for {
 		if sp == nil {
 			sp = cc.getSendPackets()
-			sp.Packets = sp.buf
 		}
 		var err error
 		sp.Packets, err = cc.writeBufferAndSend(ctx, sp.Packets, w, r)
@@ -677,7 +671,6 @@ func (cc *ClientConn) sendWorker(ctx context.Context, w net.Conn, r net.Conn) {
 			return
 		}
 		if len(sp.Packets) > 0 {
-			sp.buf = sp.Packets
 			if err := cc.postData(ctx, sp); err != nil {
 				return
 			}
@@ -707,31 +700,6 @@ func (cc *ClientConn) netWrite(ctx context.Context, w net.Conn, buf []byte) (siz
 }
 
 func (cc *ClientConn) writeBufferAndSend(ctx context.Context, buf []byte, w, r net.Conn) ([]byte, error) {
-	/*
-		for {
-				if err = r.SetReadDeadline(time.Now().Add(cc.proxy.cfg.BufferFlushTime)); err != nil {
-					return
-				}
-				var n int
-				n, err = r.Read(buf)
-				size += n
-				if n > 0 {
-					if n, err := cc.netWrite(ctx, w, buf[:n]); err != nil {
-						return n, err
-					}
-				}
-				if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-					return
-				} else if err != nil && err == io.EOF {
-					return
-				}
-				buf = buf[n:]
-				if len(buf) == 0 {
-					return
-				}
-		}
-	*/
-
 	if len(buf) < 4 {
 		buf = append(buf, []byte{0, 0, 0, 0}...)
 	}

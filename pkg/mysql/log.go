@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/masahide/mysql-audit-proxy/pkg/colfer"
 	"github.com/masahide/mysql-audit-proxy/pkg/gencode"
 )
 
@@ -46,7 +47,7 @@ type auditLogs struct {
 	EncodeType byte
 	MaxBufSize int
 	RotateTime time.Duration
-	Queue      chan *spBuffer
+	Queue      chan *gencode.SendPackets
 	Bs         *buffers
 
 	gz io.WriteCloser
@@ -102,7 +103,6 @@ func (a *auditLogs) closeStream() (err error) {
 func (a *auditLogs) logWorker(ctx context.Context, res chan error) {
 	var err error
 	var w io.Writer
-	ColferSizeMax = a.MaxBufSize << 1
 	defer func() { a.closeStream(); res <- err; close(res) }()
 	if w, err = a.openStream(time.Now()); err != nil {
 		return
@@ -122,7 +122,7 @@ func (a *auditLogs) logWorker(ctx context.Context, res chan error) {
 			e = a.newLogEncoder(w, a.EncodeType)
 		case <-ctx.Done():
 			for p := range a.Queue {
-				if err = e.Encode(&p.SendPackets); err != nil {
+				if err = e.Encode(p); err != nil {
 					return
 				}
 				a.Bs.Put(p)
@@ -133,7 +133,7 @@ func (a *auditLogs) logWorker(ctx context.Context, res chan error) {
 			if !ok {
 				return
 			}
-			if err = e.Encode(&p.SendPackets); err != nil {
+			if err = e.Encode(p); err != nil {
 				return
 			}
 			a.Bs.Put(p)
@@ -208,7 +208,7 @@ func (l *LogDecoder) Decode(out io.Writer, in io.Reader) error {
 				*/
 				return err
 			}
-			out := ColferSendPackets{
+			out := colfer.ColferSendPackets{
 				Datetime:     time.Unix(sp.Datetime, 0),
 				ConnectionID: sp.ConnectionID,
 				User:         sp.User,
@@ -231,7 +231,7 @@ func (l *LogDecoder) Decode(out io.Writer, in io.Reader) error {
 
 func (a *auditLogs) newLogDecoder(r io.Reader) logDecoder {
 	if !a.JSON {
-		return newBinaryReader(r)
+		return a.newBinaryReader(r)
 	}
 	return json.NewDecoder(r)
 }
@@ -242,14 +242,14 @@ type logEncoder interface {
 
 func (a *auditLogs) newLogEncoder(w io.Writer, t byte) logEncoder {
 	if !a.JSON {
-		return newBinaryWriter(w, t)
+		return a.newBinaryWriter(w, t)
 	}
 	return json.NewEncoder(w)
 }
-func newBinaryWriter(w io.Writer, t byte) logEncoder {
+func (a *auditLogs) newBinaryWriter(w io.Writer, t byte) logEncoder {
 	c := &BinaryWriter{
 		output:     w,
-		dataBuf:    make([]byte, ColferSizeMax),
+		dataBuf:    make([]byte, a.MaxBufSize),
 		buf:        &bytes.Buffer{},
 		encodeType: t,
 	}
@@ -322,7 +322,7 @@ func gobEncode(c *BinaryWriter, s interface{}) error {
 	return err
 }
 func colferEncode(c *BinaryWriter, s interface{}) error {
-	sp, ok := s.(*ColferSendPackets)
+	sp, ok := s.(*colfer.ColferSendPackets)
 	if !ok {
 		tsp, ok := s.(*gencode.SendPackets)
 		if !ok {
@@ -348,10 +348,10 @@ type BinaryReader struct {
 	dataBuf []byte
 }
 
-func newBinaryReader(r io.Reader) logDecoder {
+func (a *auditLogs) newBinaryReader(r io.Reader) logDecoder {
 	c := &BinaryReader{
 		input:   bufio.NewReader(r),
-		dataBuf: make([]byte, ColferSizeMax),
+		dataBuf: make([]byte, a.MaxBufSize),
 	}
 	return c
 }
@@ -360,6 +360,10 @@ func gencodeReader(c *BinaryReader, s *gencode.SendPackets) error {
 	size, err := binary.ReadUvarint(c.input)
 	if err != nil {
 		return err
+	}
+	if uint64(len(c.dataBuf)) < size {
+		//log.Printf("gencodeReaeder len(dataBuf):%d, size:%d", len(c.dataBuf), size)
+		c.dataBuf = append(c.dataBuf, make([]byte, int(size)-len(c.dataBuf))...)
 	}
 	_, err = io.ReadFull(c.input, c.dataBuf[:size])
 	if err != nil {
@@ -415,18 +419,22 @@ func (c *BinaryReader) colferDecode(s *gencode.SendPackets) error {
 	if err != nil {
 		return err
 	}
+	if uint64(len(c.dataBuf)) < size {
+		//log.Printf("colferReader len(dataBuf):%d, size:%d", len(c.dataBuf), size)
+		c.dataBuf = append(c.dataBuf, make([]byte, int(size)-len(c.dataBuf))...)
+	}
 	_, err = io.ReadFull(c.input, c.dataBuf[:size])
 	if err != nil {
 		return err
 	}
-	csp := &ColferSendPackets{}
+	csp := &colfer.ColferSendPackets{}
 	_, err = csp.Unmarshal(c.dataBuf[:size])
 	cpSp(s, csp)
 	return err
 }
 
-func getColferSp(sp *gencode.SendPackets) *ColferSendPackets {
-	return &ColferSendPackets{
+func getColferSp(sp *gencode.SendPackets) *colfer.ColferSendPackets {
+	return &colfer.ColferSendPackets{
 		Datetime:     time.Unix(sp.Datetime, 0),
 		ConnectionID: sp.ConnectionID,
 		User:         sp.User,
@@ -439,7 +447,7 @@ func getColferSp(sp *gencode.SendPackets) *ColferSendPackets {
 	}
 }
 
-func cpSp(to *gencode.SendPackets, csp *ColferSendPackets) {
+func cpSp(to *gencode.SendPackets, csp *colfer.ColferSendPackets) {
 	to.Datetime = csp.Datetime.Unix()
 	to.ConnectionID = csp.ConnectionID
 	to.User = csp.User

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/masahide/mysql-audit-proxy/pkg/colfer"
 	"github.com/masahide/mysql-audit-proxy/pkg/gencode"
 )
 
@@ -82,7 +83,7 @@ func testLogWorker(t *testing.T, encType byte, testDataFile string, result bool)
 
 	bufSize := 32 * 1024 * 1024
 	bs := newBuffers(bufSize, 200)
-	queue := make(chan *spBuffer, 1)
+	queue := make(chan *gencode.SendPackets, 1)
 	al := &auditLogs{
 		FileName:   tmpFile.Name(),
 		RotateTime: time.Hour,
@@ -99,10 +100,10 @@ func testLogWorker(t *testing.T, encType byte, testDataFile string, result bool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dec := json.NewDecoder(f)
+	jsondec := json.NewDecoder(f)
 	for {
-		sp := &ColferSendPackets{}
-		err := dec.Decode(sp)
+		sp := &colfer.ColferSendPackets{}
+		err := jsondec.Decode(sp)
 		if err == io.EOF {
 			break
 		}
@@ -130,16 +131,16 @@ func cmpStructs(filename, testDataFile string, t *testing.T) string {
 
 	in, _ := os.Open(filename)
 	gzr, _ := gzip.NewReader(in)
-	a := &auditLogs{JSON: false}
-	dec := a.newLogDecoder(gzr)
+	a := &auditLogs{JSON: false, MaxBufSize: 32 * 1024 * 1024}
+	logdec := a.newLogDecoder(gzr)
 	dataf, _ := os.Open(testDataFile)
 	defer dataf.Close()
 	orgDec := json.NewDecoder(dataf)
 	i := 1
 	for {
 		sp := &gencode.SendPackets{}
-		org := &ColferSendPackets{}
-		dataerr := dec.Decode(sp)
+		org := &colfer.ColferSendPackets{}
+		dataerr := logdec.Decode(sp)
 		if dataerr == io.EOF {
 			break
 		}
@@ -163,7 +164,7 @@ func cmpStructs(filename, testDataFile string, t *testing.T) string {
 	return ""
 }
 
-func spcmp(a *ColferSendPackets, b *gencode.SendPackets) string {
+func spcmp(a *colfer.ColferSendPackets, b *gencode.SendPackets) string {
 	res := ""
 	if a.Datetime.Unix() != b.Datetime {
 		res = fmt.Sprintf("Datetime %v : %v\n", a.Datetime, b.Datetime)
@@ -212,8 +213,9 @@ func TestEncode(t *testing.T) {
 	//b := []byte{}
 
 	buf := &bytes.Buffer{}
-	w := newBinaryWriter(buf, EncodeTypeColfer)
-	packet := &ColferSendPackets{
+	a := &auditLogs{MaxBufSize: 32 * 1024 * 1024}
+	w := a.newBinaryWriter(buf, EncodeTypeColfer)
+	packet := &colfer.ColferSendPackets{
 		ConnectionID: 1,
 		User:         "user01",
 	}
@@ -223,7 +225,7 @@ func TestEncode(t *testing.T) {
 	}
 	//pp.Println(buf.Bytes())
 	buf.Reset()
-	packet = &ColferSendPackets{}
+	packet = &colfer.ColferSendPackets{}
 	//packet.User = strings.Repeat("a", 1000000)
 	if err := w.Encode(packet); err != nil {
 		t.Error(err)
@@ -234,7 +236,7 @@ func TestEncode(t *testing.T) {
 	}
 }
 
-func newSpBuffer(bs *buffers, org *ColferSendPackets) *spBuffer {
+func newSpBuffer(bs *buffers, org *colfer.ColferSendPackets) *gencode.SendPackets {
 	sp := bs.Get()
 	sp.Datetime = org.Datetime.Unix()
 	sp.User = org.User
