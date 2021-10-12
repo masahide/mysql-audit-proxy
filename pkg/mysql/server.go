@@ -701,6 +701,9 @@ func (cc *ClientConn) writeBufferAndSend(ctx context.Context, writeBuf []byte, w
 	header := writeBuf[:4] //[]byte{0, 0, 0, 0}
 	n, err := cc.readFull(ctx, r, header)
 	if err != nil {
+		if n == 0 && err == io.EOF {
+			return writeBuf, err
+		}
 		return writeBuf, fmt.Errorf("packet ReadFull header err: %w n:%d", err, n)
 	}
 
@@ -742,7 +745,7 @@ func (cc *ClientConn) readFull(ctx context.Context, r net.Conn, buf []byte) (int
 			}
 		case errors.Is(err, io.EOF):
 			if size == 0 {
-				return 0, nil
+				return size, err
 			}
 			return size, io.ErrUnexpectedEOF
 		case err != nil:
