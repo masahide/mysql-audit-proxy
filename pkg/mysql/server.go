@@ -748,7 +748,7 @@ func (cc *ClientConn) writeBufferAndSend(ctx context.Context, buf []byte, w, r n
 	if len(buf) < 4+length {
 		buf = append(buf, make([]byte, length+4-len(buf))...)
 	}
-	databuf := buf[4:length]
+	databuf := buf[4 : length+4]
 	if n, err := io.ReadFull(r, databuf); err != nil {
 		return nil, fmt.Errorf("packet ReadFull data err: %w n:%d want:%d", err, n, len(databuf))
 	}

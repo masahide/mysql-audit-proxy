@@ -31,7 +31,7 @@ test
 
 ```bash
 # start mysql 5.7
-docker run --rm --name demo_mysql -e MYSQL_ROOT_PASSWORD=secret -d mysql:5.7
+docker run --rm --name demo_mysql -e MYSQL_ROOT_PASSWORD=secret -p 3306:3306 -d mysql:5.7
 
 # connect
 MYSQL_PWD=secret mysql -h 127.0.0.1 -uroot
