@@ -33,7 +33,7 @@ jobs:
       run: go test -v ./...
 
   build-artifact:
-    name: Build RPMs
+    name: Build tar.gz
     needs: test
     runs-on: ubuntu-latest
     strategy:
@@ -42,6 +42,7 @@ jobs:
         include:
         - os: mac64
           goos: darwin
+          arch: amd64
         - os: lin64
           goos: linux
           arch: amd64
@@ -52,13 +53,10 @@ jobs:
       - run: go version
       - uses: actions/checkout@v1
       - name: Create artifact
-        env:
-          goos: ${{ matrix.goos }}
-          goarch: ${{ matrix.arch }}
         run: |
-          GOOS=$goos GOARCH=$goarch go build -v -o bin/${{ env.APP_NAME }} .
-          GOOS=$goos GOARCH=$goarch go build -v -o bin/${{ env.LOGDECODER_NAME }} decoder/main.go
-          assets="${{ env.APP_NAME }}_$(echo "$goos-$goarch" | tr '[:upper:]' '[:lower:]')"
+          GOOS=$${{ matrix.goos }} GOARCH=$${{ matrix.arch }} go build -v -o bin/${{ env.APP_NAME }} .
+          GOOS=$${{ matrix.goos }} GOARCH=$${{ matrix.arch }} go build -v -o bin/${{ env.LOGDECODER_NAME }} decoder/main.go
+          assets="${{ env.APP_NAME }}_$(echo "$${{ matrix.goos }}-$${{ matrix.arch }}" | tr '[:upper:]' '[:lower:]')"
           mkdir dist
           echo "$assets"
           mkdir -p "dist/$assets"
@@ -75,6 +73,8 @@ jobs:
           path: |
             dist/*.tar.gz
   build-linux-packages:
+    name: Build RPMs
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-go@v2
@@ -87,8 +87,8 @@ jobs:
           goos: ${{ matrix.goos }}
           goarch: ${{ matrix.arch }}
         run: |
-          GOOS=$goos GOARCH=$goarch go build -v -o bin/${{ env.APP_NAME }} .
-          GOOS=$goos GOARCH=$goarch go build -v -o bin/${{ env.LOGDECODER_NAME }} decoder/main.go
+          GOOS=$${{ matrix.goos }} GOARCH=$${{ matrix.arch }} go build -v -o bin/${{ env.APP_NAME }} .
+          GOOS=$${{ matrix.goos }} GOARCH=$${{ matrix.arch }} go build -v -o bin/${{ env.LOGDECODER_NAME }} decoder/main.go
           mkdir -p .debpkg/usr/bin
           mkdir -p .rpmpkg/usr/bin
           cp -p bin/* .debpkg/usr/local/bin/
