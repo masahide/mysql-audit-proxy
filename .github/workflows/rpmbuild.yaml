@@ -18,7 +18,10 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/setup-go@v1.17
+    - uses: actions/setup-go@v2
+      with:
+        go-version: '^1.17.2'
+    - run: go version
 
     - name: Check out code into the Go module directory
       uses: actions/checkout@v1
@@ -43,7 +46,10 @@ jobs:
           goos: linux
           arch: amd64
     steps: 
-      - uses: actions/setup-go@v1.17
+      - uses: actions/setup-go@v2
+        with:
+          go-version: '^1.17.2'
+      - run: go version
       - uses: actions/checkout@v1
       - name: Create artifact
         env:
@@ -71,7 +77,10 @@ jobs:
   build-linux-packages:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-go@v1.17
+      - uses: actions/setup-go@v2
+        with:
+          go-version: '^1.17.2'
+      - run: go version
       - uses: actions/checkout@v1
       - name: Go build
         env:

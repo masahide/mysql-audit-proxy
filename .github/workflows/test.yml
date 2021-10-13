@@ -2,7 +2,7 @@ on:
   pull_request:
   push:
     tags-ignore:
-      - *
+      - '*'
     branches-ignore:
       - '__build-test*'
 
