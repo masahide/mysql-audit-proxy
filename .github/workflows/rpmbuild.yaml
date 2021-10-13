@@ -45,7 +45,6 @@ jobs:
       - name: Set up Go 1
         uses: actions/setup-go@v1
 
-      - name: checkout
       - uses: actions/checkout@v1
       - name: Create artifact
         env:
@@ -76,6 +75,7 @@ jobs:
       - name: Set up Go 1
         uses: actions/setup-go@v1
       - uses: actions/checkout@v1
+      - name: Go build
         env:
           goos: ${{ matrix.goos }}
           goarch: ${{ matrix.arch }}
