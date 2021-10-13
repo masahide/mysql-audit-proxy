@@ -56,7 +56,7 @@ jobs:
         run: |
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.arch }} go build -v -o bin/${{ env.APP_NAME }} .
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.arch }} go build -v -o bin/${{ env.LOGDECODER_NAME }} decoder/main.go
-          assets="${{ env.APP_NAME }}_$(echo "$${{ matrix.goos }}-$${{ matrix.arch }}" | tr '[:upper:]' '[:lower:]')"
+          assets="${{ env.APP_NAME }}_$(echo "${{ matrix.goos }}-${{ matrix.arch }}" | tr '[:upper:]' '[:lower:]')"
           mkdir dist
           echo "$assets"
           mkdir -p "dist/$assets"
@@ -96,8 +96,7 @@ jobs:
         run: |
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.arch }} go build -v -o bin/${{ env.APP_NAME }} .
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.arch }} go build -v -o bin/${{ env.LOGDECODER_NAME }} decoder/main.go
-          mkdir -p .debpkg/usr/local/bin
-          mkdir -p .rpmpkg/usr/local/bin
+          mkdir -p .debpkg/usr/local/bin mkdir -p .rpmpkg/usr/local/bin
           cp -p bin/* .debpkg/usr/local/bin/
           cp -p bin/* .rpmpkg/usr/local/bin/
       - uses: jiro4989/build-deb-action@v2
@@ -105,7 +104,7 @@ jobs:
           package: ${{ env.APP_NAME }}
           package_root: .debpkg
           maintainer: ${{ env.MAINTAINER }}
-          version: ${{ github.ref }}
+          version: ${{ github.job }}
           arch: 'amd64'
           desc: '${{ env.DESC }}'
 
@@ -115,7 +114,7 @@ jobs:
           package: ${{ env.APP_NAME }}
           package_root: .rpmpkg
           maintainer: ${{ env.MAINTAINER }}
-          version: ${{ github.ref }}
+          version: ${{ github.job }}
           arch: 'x86_64'
           desc: '${{ env.DESC }}'
 
