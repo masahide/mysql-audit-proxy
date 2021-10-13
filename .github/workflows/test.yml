@@ -1,4 +1,11 @@
-on: [push, pull_request]
+on:
+  pull_request:
+  push:
+    tags-ignore:
+      - *
+    branches-ignore:
+      - '__build-test*'
+
 name: Test
 jobs:
   test:

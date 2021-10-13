@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*.*.*'
+    branches:
+      - '__build-test*'
 
 env:
   APP_NAME: 'mysql-audit-proxy'
@@ -16,8 +18,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-    - name: Set up Go 1
-      uses: actions/setup-go@v1
+    - uses: actions/setup-go@v1.17
 
     - name: Check out code into the Go module directory
       uses: actions/checkout@v1
@@ -42,9 +43,7 @@ jobs:
           goos: linux
           arch: amd64
     steps: 
-      - name: Set up Go 1
-        uses: actions/setup-go@v1
-
+      - uses: actions/setup-go@v1.17
       - uses: actions/checkout@v1
       - name: Create artifact
         env:
@@ -72,8 +71,7 @@ jobs:
   build-linux-packages:
     runs-on: ubuntu-latest
     steps:
-      - name: Set up Go 1
-        uses: actions/setup-go@v1
+      - uses: actions/setup-go@v1.17
       - uses: actions/checkout@v1
       - name: Go build
         env:
