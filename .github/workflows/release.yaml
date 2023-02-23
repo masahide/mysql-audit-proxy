@@ -8,7 +8,7 @@ jobs:
     name: linux-amd64
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: build,gzip and release
       uses: masahide/golang-release-action@master
       env:
@@ -19,7 +19,7 @@ jobs:
     name: darwin-amd64
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: build,gzip and release
       uses: masahide/golang-release-action@master
       env:
@@ -30,7 +30,7 @@ jobs:
     name: windows-amd64
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: build,gzip and release
       uses: masahide/golang-release-action@master
       env:
@@ -41,7 +41,7 @@ jobs:
     name: linux-amd64
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: build,gzip and release
       uses: masahide/golang-release-action@master
       env:
@@ -54,7 +54,7 @@ jobs:
     name: darwin-amd64
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: build,gzip and release
       uses: masahide/golang-release-action@master
       env:
@@ -67,7 +67,7 @@ jobs:
     name: windows-amd64
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: build,gzip and release
       uses: masahide/golang-release-action@master
       env:
