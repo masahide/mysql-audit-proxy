@@ -10,6 +10,7 @@ env:
   LOGDECODER_NAME: 'mysql-audit-proxy-logdecoder'
   MAINTAINER: 'masahide'
   DESC: 'Proxy for mysql audit recording'
+  GOVERSION: '1.19'
 
 jobs:
   test:
@@ -17,10 +18,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Set up Go 1
-      uses: actions/setup-go@v1
+      uses: actions/setup-go@v3
+      with:
+        go-version: ${{ env.GOVERSION }}
 
     - name: Check out code into the Go module directory
-      uses: actions/checkout@v1
+      uses: actions/checkout@v3
 
     - name: Get dependencies
       run: go get -v -t -d ./...
@@ -43,9 +46,11 @@ jobs:
           arch: amd64
     steps: 
       - name: Set up Go 1
-        uses: actions/setup-go@v1
+        uses: actions/setup-go@v3
+        with:
+          go-version: ${{ env.GOVERSION }}
 
-      - uses: actions/checkout@v1
+      - uses: actions/checkout@v3
       - name: Create artifact
         env:
           goos: ${{ matrix.goos }}
@@ -73,8 +78,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Set up Go 1
-        uses: actions/setup-go@v1
-      - uses: actions/checkout@v1
+        uses: actions/setup-go@v3
+        with:
+          go-version: ${{ env.GOVERSION }}
+      - uses: actions/checkout@v3
       - name: Go build
         env:
           goos: ${{ matrix.goos }}
