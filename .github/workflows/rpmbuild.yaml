@@ -89,8 +89,8 @@ jobs:
         run: |
           GOOS=$goos GOARCH=$goarch go build -v -o bin/${{ env.APP_NAME }} .
           GOOS=$goos GOARCH=$goarch go build -v -o bin/${{ env.LOGDECODER_NAME }} decoder/main.go
-          mkdir -p .debpkg/usr/bin
-          mkdir -p .rpmpkg/usr/bin
+          mkdir -p .debpkg/usr/local/bin
+          mkdir -p .rpmpkg/usr/local/bin
           cp -p bin/* .debpkg/usr/local/bin/
           cp -p bin/* .rpmpkg/usr/local/bin/
       - uses: jiro4989/build-deb-action@v2
