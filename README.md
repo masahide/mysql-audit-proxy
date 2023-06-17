@@ -1,6 +1,7 @@
 # mysql-audit-proxy
 Proxy for mysql audit recording
 
+# This source code is not maintained. It has been moved to a newer version of https://github.com/masahide/mysql8-audit-proxy
 
 Download
 -------------
